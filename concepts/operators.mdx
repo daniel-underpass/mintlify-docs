@@ -83,18 +83,42 @@ session lifecycle call needed.
 ### Publish from a browser
 
 For demos, smoke tests, or operators on phones, the console hosts
-a one-page browser publisher:
+an in-page browser publisher:
 
 ```
-https://console.luxxon.dev/publish/<sessionId>
+https://console.luxxon.dev/sessions/<sessionId>
 ```
 
-The page authenticates via the operator's wallet (SIWE), pulls
-the WHIP URL via `/producer-token`, opens `getUserMedia`
-(rear-cam preferred on mobile) + microphone, and negotiates a
-WebRTC publish. Start/stop is two clicks; the camera picker shows
-up when multiple cameras are present. The same lx-session cookie
-that gates the dashboard gates this page — no separate auth.
+In Operate mode the page authenticates via the operator's wallet
+(SIWE), pulls the WHIP URL via `/producer-token`, opens
+`getUserMedia` (rear-cam preferred on mobile) + microphone, and
+negotiates a WebRTC publish. Start/stop is two clicks; the camera
+picker shows up when multiple cameras are present. The same
+lx-session cookie that gates the dashboard gates this page — no
+separate auth.
+
+### Reclaim a stuck workspace
+
+If an operator device crashes (phone dies mid-stream, network
+flips, browser tab closes) the session can be left in `ASSIGNED`
+with the operator workspace pinned to `BUSY` and the Cloudflare
+`live_input` still minted. The pre-LIVE expiry cron sweeps these
+up eventually (at `createdAt + maxDurationSeconds`), but for a
+long session that's too slow.
+
+The operator can reclaim everything immediately:
+
+```bash
+curl -X POST .../sessions/cancel-all-assignments \
+  -H "Authorization: Bearer $OPERATOR_KEY"
+```
+
+Cancels every `ASSIGNED` session this workspace owns, releases
+the workspace to `ONLINE`, tears down each `live_input`. `LIVE`
+sessions are NOT affected — those still go through `/end` so the
+meter can run. Available in the console as the "Cancel N active
+assignments" button on the Operate side of `/sessions`. Scope:
+`sessions:operate`.
 
 ## Telemetry contract
 

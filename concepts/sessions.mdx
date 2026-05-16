@@ -12,22 +12,22 @@ the platform does cashes out into a session lifecycle.
 ## State machine
 
 ```
-                       accept           start          end
-REQUESTED ────────────▶ ASSIGNED ─────▶ LIVE ────────▶ ENDED
-   │                                                    │
-   │ DELETE                                    cleanSeconds × rate
-   ▼                                           → chargedMicroUsdc
-CANCELLED                                      → settleFromPool() on-chain
+                  accept        start +              end
+REQUESTED ──────▶ ASSIGNED ───▶ first frame ──▶ LIVE ──▶ ENDED
+   │              │             decoded                   │
+   │ DELETE       │ DELETE / bulk-cancel /        cleanSeconds × rate
+   ▼              ▼ pre-LIVE expiry                → chargedMicroUsdc
+CANCELLED       CANCELLED / EXPIRED               → settleFromPool() on-chain
 ```
 
 | State | Meaning |
 |---|---|
 | `REQUESTED` | Consumer POSTed `/sessions`. Waiting for an operator. The API has already verified the consumer's on-chain pool balance covers `rate × maxDuration`. |
-| `ASSIGNED` | Operator workspace accepted (or auto-dispatched). No signature step — the pool already covers the worst-case meter. The operator can `/start` immediately. |
-| `LIVE` | Stream is open. Meter is anchored at `startedAt`. |
+| `ASSIGNED` | Operator workspace accepted (or auto-dispatched). The operator can `/start` immediately — but `start` does NOT flip the state. The state stays `ASSIGNED` through publisher warmup; it only advances to `LIVE` once the first decoded frame is buffered server-side. |
+| `LIVE` | Frames are flowing. Meter is anchored at `startedAt`, which is stamped at the first-frame transition (NOT at `/start`) so the operator isn't billed for WebRTC negotiation + first-keyframe latency. `get_frame` returns bytes immediately. |
 | `ENDED` | Final state. Meter populated, relayer queues an on-chain `settleFromPool(...)` against the consumer's pool. |
-| `CANCELLED` | Pre-LIVE escape. Either consumer cancels, or system on timeout. |
-| `EXPIRED` | LIVE session overran `maxDuration` without `/end` — the system finalizes it and queues settlement. |
+| `CANCELLED` | Pre-LIVE escape. Consumer `DELETE`, operator bulk cancel (`POST /sessions/cancel-all-assignments`), or a tied teardown from those paths. |
+| `EXPIRED` | Two flavors: (a) LIVE session overran `maxDuration` without `/end` — the system finalizes it and queues settlement, OR (b) pre-LIVE session aged past `createdAt + maxDurationSeconds` without media ever flowing — the system releases the operator and tears down the live_input (no meter, no settle). |
 
 `PAUSED` is in the enum and on the roadmap.
 
@@ -104,8 +104,22 @@ curl -X POST .../sessions/$ID/start \
   -H "Authorization: Bearer $OPERATOR_KEY"
 ```
 
-CAS: `ASSIGNED → LIVE`. Server stamps `startedAt`. From this moment,
-the meter is ticking against this timestamp.
+Provisions the Cloudflare Stream `live_input`, returns the WHIP +
+WHEP URLs, flips the operator workspace to `BUSY`. **State stays
+`ASSIGNED`** — the transition to `LIVE` only fires once the
+server-side WHEP subscriber decodes a frame off the wire. That
+means consumers polling for `state === "LIVE"` won't see it until
+`get_frame` will actually return bytes — no more 3-5s "LIVE but
+404 on /frame" race.
+
+`startedAt` is stamped at the LIVE transition (not at `/start`), so
+the meter only charges from media-flowing time. WebRTC negotiation
++ first-keyframe latency is free.
+
+`start` is **idempotent**: if a `live_input` was already minted for
+this session, the second call returns the existing WHIP/WHEP URLs
+instead of creating a new one. Operator can safely re-fetch (page
+reload mid-warmup, double-click on the Start button, etc.).
 
 <Warning>
 Once the **telemetry preflight** ships (roadmap), `start` will reject
@@ -144,10 +158,39 @@ curl -X DELETE .../sessions/$ID \
 ```
 
 Allowed in `REQUESTED` or `ASSIGNED`. Transitions to `CANCELLED`. No
-meter, no charge.
+meter, no charge. Tears down the Cloudflare `live_input` and
+releases the operator workspace (`BUSY → ONLINE`) in the same
+transaction so the workspace can take new work immediately.
 
 `DELETE` on a LIVE session is **not** end — it returns `INVALID_STATE`.
 Use `POST /:id/end` for that.
+
+### Operator bulk cancel
+
+When an operator's device crashes mid-stream they're left with stuck
+`ASSIGNED` rows that pin the workspace as `BUSY` until the consumer
+cancels or the pre-LIVE expiry fires. The operator can reclaim the
+workspace immediately:
+
+```bash
+curl -X POST .../sessions/cancel-all-assignments \
+  -H "Authorization: Bearer $OPERATOR_KEY"
+```
+
+Cancels every `ASSIGNED` session where the caller's workspace is
+the operator. Returns `{ count, cancelled[] }`. `LIVE` sessions are
+NOT touched — those still finish via `/end` so the meter can run.
+
+Scope: `sessions:operate`.
+
+### Pre-LIVE expiry
+
+A background cron sweeps `REQUESTED` / `ASSIGNED` rows where
+`createdAt + maxDurationSeconds < NOW()` and moves them to
+`EXPIRED`. This is the backstop for an operator that called
+`/start` but never published, or a `REQUESTED` session that nothing
+ever picked up. No meter is run (`startedAt` is null), but the
+operator workspace + Cloudflare `live_input` are still torn down.
 
 ## Reading
 
@@ -181,11 +224,13 @@ The edge is Cloudflare Stream WebRTC. Sub-second latency,
 open protocols on both sides, no proprietary SDK to integrate.
 
 **From the console:** open
-[**console.luxxon.dev → /workspace/[id]/sessions/[sid]**](https://console.luxxon.dev)
-on a LIVE session for an embedded WHEP viewer. Operators publishing from a
-browser can open `console.luxxon.dev/publish/[sessionId]` — that page
-opens `getUserMedia` (rear cam preferred), fetches the WHIP URL via
-`/producer-token`, and negotiates the publish from the browser.
+[**console.luxxon.dev → /sessions/[sid]**](https://console.luxxon.dev)
+for the embedded media surface. The page renders the WHEP viewer
+when you're the consumer side and the in-page WHIP publisher when
+you're the operator side (toggle via the Request / Operate switch).
+The publisher opens `getUserMedia` (rear cam preferred), fetches
+the WHIP URL via `/producer-token`, negotiates the publish, and
+runs location heartbeats while publishing.
 
 ## Frames for AI agents
 
@@ -196,11 +241,13 @@ continuous WebRTC stream — the JPEG goes straight to a vision
 model without a media-decoding stack on the caller's side.
 
 Implementation: lx-api runs a per-session WHEP subscriber that
-decodes and caches the latest frame (~1 fps). The first
-keyframe typically arrives within 3-5 seconds of `/start`;
-calls before that return `404 FRAME_NOT_AVAILABLE`. After,
-each call returns the latest cached buffer with
-`Cache-Control: no-store`.
+decodes and caches the latest frame (~1 fps). The session's
+`state` transition to `LIVE` is itself gated on the first buffered
+JPEG — so the first `get_frame` call after `state === "LIVE"`
+always returns bytes, with `Cache-Control: no-store`. Calls during
+`ASSIGNED` (pre-first-frame) return `404 FRAME_NOT_AVAILABLE`,
+which is also what consumers waiting via the SDK's `waitFor` see
+until `LIVE` lands.
 
 ```bash
 curl -H "Authorization: Bearer $KEY" \

@@ -175,9 +175,12 @@ For LIVE sessions only. Returns the latest decoded video frame as a
 JPEG content block. MCP-aware clients pass it straight to the LLM as
 image input — no base64 plumbing on your side.
 
-The first call right after `request_live_view` resolves may return
-`FRAME_NOT_AVAILABLE` for 3-5s while Cloudflare's edge sends the
-first keyframe. Retry with a short backoff.
+`get_frame` is reliable the moment `state === "LIVE"`: the API only
+flips the state once the first JPEG is buffered server-side, so the
+first call after `request_live_view` / `wait_for_live` resolves
+always returns bytes. Calling during `ASSIGNED` (pre-first-frame)
+returns `FRAME_NOT_AVAILABLE` — that's where `wait_for_live` is
+meant to do the waiting for you.
 
 ## Auth
 
