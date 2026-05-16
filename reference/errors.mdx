@@ -74,7 +74,7 @@ try {
 | `NO_COVERAGE` | 503 | No ONLINE operator covers the requested point. | Widen the request, try a different zone, or wait for an operator to come online. |
 | `OUTSIDE_COVERAGE` | 400 | Requested point is outside the operator's declared coverage circle. | Move the request inside the operator's range. |
 | `UNAVAILABLE` | 503 | Dispatch found no idle operator. | Retry shortly. |
-| `FRAME_NOT_AVAILABLE` | 404 | No decoded frame yet — either the first keyframe hasn't landed or the publisher disconnected. | Retry in 1-2s; ~3-5s warmup after `request_live_view` resolves is normal. |
+| `FRAME_NOT_AVAILABLE` | 404 | No decoded frame yet — only fires while the session is `ASSIGNED` (pre-first-frame) or after the publisher disconnects mid-session. Once `state === "LIVE"`, the API only flips after a JPEG is buffered, so the first call is reliable. | Use `wait_for_live` to wait out the `ASSIGNED` → `LIVE` transition rather than spinning on `get_frame`. |
 
 ## Wallet + settlement
 
