@@ -1,0 +1,72 @@
+---
+title: Console
+description: The wallet-authed dashboard at console.luxxon.dev — everything the curl quickstart does, minus the curl.
+keywords: ["console", "dashboard", "wallet", "metamask", "siwe", "browser ui", "workspace management"]
+boost: 3
+---
+
+[**console.luxxon.dev**](https://console.luxxon.dev) is the browser
+half of Luxxon. Same wire protocol as the SDK and curl — just
+wrapped in a UI for the humans-with-wallets path.
+
+## What it covers
+
+| Surface | What it does |
+|---|---|
+| **Sign in** | MetaMask / Coinbase / Rabby / any injected wallet → SIWE challenge → `lx_session` cookie. |
+| **Workspaces** | Pick an existing workspace or stand up a new one (signed challenge, picks `CONSUMER` / `SUPPLIER` roles). |
+| **`/overview`** | Workspace dashboard. Wallet panel first; API keys below. |
+| **`/sessions`** | Request/Operate segmented toggle. *Request* opens a "+ New session" modal and filters the list to consumer-side rows. *Operate* shows an operator status card (availability + coverage + device) with an Edit-in-modal button and filters the list to operator-side rows. |
+| **`/sessions/[sid]`** | Same toggle. *Request* renders the embedded WHEP viewer when LIVE. *Operate* renders the WHIP publisher in-page — no more standalone publish route. The publisher unmounts the moment the session transitions to `ENDED` / `EXPIRED` / `CANCELLED`. |
+| **`/settings`** | Workspace details. Identity card with an Edit button → modal that renames the workspace (only `name` is mutable in v1; slug + roles + wallet are locked). Supplier-only Operator config card with its own Edit modal (same form as the Operate tab). |
+| **API keys** | Mint (plaintext shown once with a copy + confirm gate), list, revoke. Scopes presented as a checkbox grid. |
+| **Wallet** | viem-reads ETH balance, USDC balance, and `LuxxonSettlement.deposits(wallet)` (your pool balance). Top up is two discrete steps — *Approve USDC* (one popup, only on first top-up), then *Deposit* (one popup per top-up). Withdraw pulls the balance back at any time — even while the contract is paused. |
+
+## When to use it vs. the API
+
+| Use the console for | Use the API / SDK / MCP for |
+|---|---|
+| Setting up a workspace + first API key | Calling sessions from server code |
+| Approving USDC for settlement | Anything machine-driven |
+| Watching a LIVE session in the browser | Pulling JPEG frames for vision models |
+| Publishing from a phone camera for demos | Native operator apps |
+
+## Auth model
+
+Wallet-only. No email, no password.
+
+1. **Sign in** — wagmi connector pops your wallet; you sign the
+   SIWE challenge bound to your wallet address.
+2. **Workspace pick** — `/me` returns the workspaces your wallet
+   can administer; pick one; lx-api stamps the choice onto your
+   `lx_session` cookie.
+3. **Everything else** — server actions forward the cookie to
+   lx-api. Cookies never cross origins; the lx-api CORS allowlist
+   doesn't have to grow for every console deploy.
+
+Two cookies are in play: `lx_session` is the HttpOnly auth secret
+(forwarded to lx-api); `lx_workspace` is a plain cookie carrying
+the active workspaceId so client components can read the active
+tenant without a round-trip. Middleware bounces requests missing
+either cookie to `/` or `/picker` respectively.
+
+API keys are workspace-scoped and live alongside the console
+sessions — you can have both at once, and the console can revoke
+keys but never logs into them.
+
+## Local dev
+
+```bash
+git clone https://github.com/luxxon-dev/luxxon
+cd luxxon/apps/web/luxxon-console
+pnpm install
+LUXXON_API_URL=https://api.luxxon.dev/api/v1 pnpm dev   # http://localhost:3020
+```
+
+Or override to a local lx-api:
+
+```bash
+LUXXON_API_URL=http://localhost:3010/api/v1 pnpm dev
+```
+
+The repo lives at [github.com/luxxon-dev/luxxon](https://github.com/luxxon-dev/luxxon).

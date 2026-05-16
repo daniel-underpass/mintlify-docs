@@ -1,0 +1,156 @@
+---
+title: "Programmable vision"
+description: "A global API for on-demand live video feeds — paid per second, settled on-chain in USDC."
+icon: "eye"
+keywords: ["luxxon", "vision api", "ai agents", "live video", "webrtc", "whip", "whep", "usdc", "base", "on-chain settlement", "agent infrastructure"]
+boost: 5
+---
+
+
+Luxxon is a marketplace API for real-time visual feeds. A consumer
+makes a request — a point on Earth, a duration, a wallet — and
+within seconds a live WebRTC stream from an on-site operator opens,
+metered per second, settled on-chain.
+
+The supply side is anyone with a camera and an internet connection: a
+phone in someone's hand, a stationary PTZ at a gas station, an
+enterprise drone fleet, an autonomous robot. The demand side is anyone
+or anything that needs eyes on the world: an AI agent verifying a
+property condition, an insurance adjuster pre-screening a claim, a
+security firm extending its patrol radius, a journalist confirming a
+scene. One API, one marketplace.
+
+<CardGroup cols={2}>
+  <Card
+    title="Quickstart"
+    description="Zero to a settled session in five HTTP calls."
+    href="/quickstart"
+  />
+  <Card
+    title="MCP server"
+    description="Drop Luxxon into Claude Desktop, Cursor, or Claude Code as agent-callable tools."
+    href="/concepts/mcp"
+  />
+  <Card
+    title="TypeScript SDK"
+    description="@luxxon/sdk — pure-fetch HTTP client over the public REST surface."
+    href="/concepts/sdks"
+  />
+  <Card
+    title="Architecture"
+    description="The wide-angle view: layers, auth, data, settlement."
+    href="/concepts/architecture"
+  />
+</CardGroup>
+
+## How it works
+
+A consumer wallet pre-funds a pool once and then runs as many
+sessions as that pool covers — with zero wallet popups in between.
+
+**Top up.** The consumer calls `LuxxonSettlement.deposit(amount)`
+on Base. The first top-up is two signed transactions (USDC
+`approve` + the `deposit` itself); subsequent top-ups only need
+the deposit signature. The pool balance is on-chain state — the
+consumer can read it any time and withdraw the remainder with
+`withdraw(amount)`, which the contract honors even if the rest
+of the platform is paused.
+
+**Request.** The consumer `POST`s a lat/lng + max duration to
+`/sessions`. The rate is locked at request time. Before the
+session is accepted, the API reads the consumer's pool balance
+on-chain and rejects with `INSUFFICIENT_CREDIT` if the worst-case
+charge (`rate × maxDuration`) can't be covered. No on-chain hold,
+no debit — just a pre-flight check.
+
+**Match.** The dispatcher coverage-filters by PostGIS, picks the
+longest-idle SUPPLIER inside the geofence, and atomically flips
+that workspace to BUSY. The session transitions REQUESTED →
+ASSIGNED. No signature step on either side.
+
+**Stream.** The operator publishes over WHIP to Cloudflare Stream;
+the consumer subscribes over WHEP. Sub-second latency, open
+protocols both directions. Agents that don't want a WebRTC stack
+poll `GET /sessions/:id/frame` and get a JPEG of the latest
+keyframe.
+
+**End.** Either side calls `/sessions/:id/end`. The API finalizes
+the per-second meter (chargeable seconds = wall-clock minus open
+disconnect windows, clamped to `maxDuration`) and queues a
+settlement.
+
+**Settle.** A KMS-signed relayer submits
+`LuxxonSettlement.settleFromPool(sessionId, from, to, rate,
+seconds, toAmount, feeAmount)` on Base. The contract debits the
+consumer's pool balance, transfers USDC to the operator and the
+platform fee wallet in the same transaction, and locks the
+session against replay. Trust boundary: the relayer can debit
+up to the consumer's pool balance, but the contract enforces a
+meter invariant (`toAmount + feeAmount ≤ rate × seconds`) so it
+can never bill above the rate the consumer signed up for.
+
+Three flavors of trust in the loop: SpiceDB for authorization,
+basis-point arithmetic for the meter, on-chain settlement for
+the ledger. None of the three holds funds beyond the pool the
+consumer themselves deposited and can withdraw at any time.
+
+## Why this exists
+
+The cost of putting a connected camera somewhere is now near-zero.
+Millions of PTZ cameras sit on storefronts, marinas, parking lots —
+capex that earns the owner nothing 99% of the time. Meanwhile, AI
+agents have made the demand for "eyes on a place" elastic for the
+first time. Luxxon is the matching layer. We don't own the cameras,
+we don't write the agents — we match supply to demand, hold the QoS
+bar, and settle the wallet transfer.
+
+## Status
+
+Luxxon is in **early access** on **Base Sepolia**. The full v1 API
+surface ships today: workspaces + API keys, sessions, dispatch with
+coverage-area + geofence enforcement, the WHIP/WHEP edge on
+Cloudflare Stream, the per-session liveness poller, the agent-frame
+endpoint, the on-chain settlement composer, and the wallet read.
+`LuxxonSettlement` v3 (deposit-pool) is deployed on Sepolia at
+[`0xa748C178…65a26`](https://sepolia.basescan.org/address/0xa748c178df47c2da2227c247293943713eb65a26)
+with the KMS-signed relayer wired end-to-end. Mainnet bringup is
+the next milestone. Want to integrate? Reach us via
+[@luxxondev](https://x.com/luxxondev).
+
+### Designed for agents
+
+Programmable vision is most useful when an agent — not a person —
+is on the consuming side. Two affordances make Luxxon
+agent-native:
+
+- **`GET /sessions/:id/frame`** returns a JPEG of the latest video
+  frame from the operator's feed. Hand it directly to a vision
+  model; no WebRTC stack required.
+- **Zero per-session signing.** The consumer wallet tops up a pool
+  on-chain once; every subsequent session debits that pool
+  automatically. An agent that holds a `LUXXON_API_KEY` and a
+  wallet with a topped-up pool runs end-to-end with no human in
+  the loop.
+
+See [Sessions](/concepts/sessions) for the full lifecycle.
+
+## Install
+
+The MCP server is published in the major agent catalogs — install
+in one click:
+
+<CardGroup cols={2}>
+  <Card
+    title="Smithery"
+    description="One-line install for Claude Desktop / Cursor / Claude Code."
+    href="https://smithery.ai/servers/luxxon"
+  />
+  <Card
+    title="Glama"
+    description="Verified MCP catalog with tool introspection + scorecard."
+    href="https://glama.ai/mcp/servers/luxxon-dev/luxxon-sdk"
+  />
+</CardGroup>
+
+Or install directly from npm: `npx -y @luxxon/mcp` — see
+[the MCP guide](/concepts/mcp) for the Claude Desktop config.

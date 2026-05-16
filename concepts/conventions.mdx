@@ -1,0 +1,157 @@
+---
+title: Conventions
+description: BigInt-as-strings, ZedTokens, basis points, error envelopes.
+---
+
+
+A handful of conventions the entire API follows. Internalize these once
+and every response stops surprising you.
+
+## Amounts: micro-USDC as strings
+
+Every USDC amount in the API is in **micro-USDC** (`µUSDC`).
+
+```
+1 USDC = 1,000,000 µUSDC
+```
+
+Stored as `BigInt`, returned as **decimal strings** in JSON:
+
+```json
+{
+  "ratePerSecondMicroUsdc": "1000",
+  "chargedMicroUsdc": "47350",
+  "trackedBalance": "50000000"
+}
+```
+
+Why strings: JSON numbers are double-precision floats — they lose
+precision above 2⁵³. A high-throughput operator running for a month
+can blow past that comfortably. Strings keep the wire format honest.
+
+To display: divide by 1_000_000. To do math: parse to BigInt in your
+language of choice and stay there until you're rendering to a human.
+
+## Factors: basis points
+
+Pricing factors and fee splits are in **basis points** (`bps`). `10000`
+is `1.0×`. `1500` is `15%`. Same integer-arithmetic discipline as the
+amounts — no float drift in the settlement math.
+
+```json
+{
+  "supplyFactor": 1.0,          // human-readable
+  "demandFactor": 1.2,
+  "platformFeeBps": 1500
+}
+```
+
+`platformFeeBps` is the canonical wire form; the human-readable
+`supplyFactor`/`demandFactor` floats are convenience output only. If
+you ever need to reproduce the math, divide bps by 10000.
+
+## Consistency: ZedTokens
+
+The authorization graph is in SpiceDB (Zanzibar). Writes are eventually
+consistent on its log. To avoid the "I just created a workspace but
+listing its keys says I don't have access" race, the API returns a
+**ZedToken** on every authz-relevant write — surfaced in the response
+body as `consistencyToken` *and* in the `X-Lx-Consistency-Token`
+response header.
+
+Echo it back on the next call:
+
+```bash
+# 1. Create workspace — capture token from header
+curl -X POST .../workspaces -i ...
+# X-Lx-Consistency-Token: GgYKBENPb1Y=
+
+# 2. Use that token on the next call
+curl .../workspaces/$ID \
+  -H "X-Lx-Consistency-Token: GgYKBENPb1Y="
+```
+
+You don't *have* to echo it — without it, SpiceDB defaults to fully
+consistent reads (slower, always correct). The token is the
+read-your-writes hint.
+
+<Tip>
+The token is opaque base64. Don't try to parse it; just pass it
+through.
+</Tip>
+
+## Auth: two transports, one principal
+
+```
+Authorization: Bearer lxxn_<env>_<workspace>_<secret>     # machines
+Cookie:        lx_session=<HMAC-signed payload>            # humans
+```
+
+The guard dispatches on which one it sees: `Bearer lxxn_*` →
+sha256-keyed API-key lookup; `lx_session` cookie → constant-time
+HMAC verify. See [Authentication](/authentication/).
+
+## Scope: header is a varargs OR
+
+API-key endpoints declare a required scope (or set of scopes). When a
+list is declared, the caller passes if their key holds **any one** of
+them. Surfaced as `INSUFFICIENT_SCOPE` (403) with the missing scope
+list quoted in the message.
+
+```json
+{
+  "statusCode": 403,
+  "code": "INSUFFICIENT_SCOPE",
+  "message": "API key missing required scope: sessions:operate | sessions:create"
+}
+```
+
+Wallet-session callers always bypass scope. Their authority is workspace
+membership in SpiceDB.
+
+## Response envelope
+
+Success:
+
+```json
+{
+  "statusCode": 200,
+  "message": "Request successful",
+  "data": { ... },
+  "timestamp": "2026-05-13T08:30:00Z"
+}
+```
+
+Error:
+
+```json
+{
+  "statusCode": 403,
+  "code": "NOT_AUTHORIZED",
+  "message": "Not authorized for this operation",
+  "detail": "session:viewDenied",
+  "timestamp": "2026-05-13T08:30:00Z"
+}
+```
+
+The `code` is the stable machine-readable handle — branch on it. The
+`detail` field carries operation-specific context (which session,
+which scope, which state) for diagnostics.
+
+See [Errors](/reference/errors/) for the full catalog.
+
+## Geography
+
+Lat/lng are passed as JSON numbers in `WGS84` (EPSG:4326), the GPS
+standard. Stored server-side as PostGIS `geography(Point, 4326)`.
+
+```json
+{ "lat": 4.71, "lng": -74.07 }
+```
+
+Geofence radii are in **meters**.
+
+## Time
+
+ISO-8601 UTC strings everywhere outbound. The API accepts the same
+format inbound. Durations are seconds.

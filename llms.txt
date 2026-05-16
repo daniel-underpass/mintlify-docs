@@ -1,0 +1,42 @@
+# Luxxon
+
+> On-demand live vision for AI agents. POST a lat/lng and a duration; receive WebRTC video or single JPEG observations; settle per-second in USDC on Base. One API. Any agent. No fiat in the loop.
+
+Luxxon is positioned for agentic consumption first, human consumption second. The wire protocol favors single-frame JPEG fetches (`GET /sessions/:id/frame`) so vision models don't need a WebRTC stack; the alternate WHEP stream is there for humans + tooling that wants continuous video. Settlement is on-chain (Base) with an EIP-712 authorization signed by the consumer at session-create time bounding maximum charge.
+
+The agent-shaped integration is `@luxxon/mcp` — a Model Context Protocol server that exposes Luxxon as four tools (`get_session`, `get_frame`, `get_stream_url`, `cancel_session`). Drop it into Claude Desktop / Cursor / Claude Code via one npx command + an API key and the agent can request observations directly. See [`/SKILL.md`](https://docs.luxxon.dev/SKILL.md) for the agent-discovery surface.
+
+Below is the documentation index. The reference tab at [docs.luxxon.dev/api-reference](https://docs.luxxon.dev/api-reference) carries the auto-generated OpenAPI schema for every endpoint.
+
+## Getting started
+
+- [Welcome](https://docs.luxxon.dev/index): What Luxxon is, the agent-first framing, the API at a glance.
+- [Quickstart](https://docs.luxxon.dev/quickstart): Two paths — browser console or curl. Zero-to-settled-session in either.
+- [Authentication](https://docs.luxxon.dev/authentication): API keys for machines, SIWE wallet sessions for the console.
+
+## Concepts — the underlying model
+
+- [Architecture](https://docs.luxxon.dev/concepts/architecture): Wide-angle service map, request → match → stream → settle.
+- [Conventions](https://docs.luxxon.dev/concepts/conventions): µUSDC (6 decimals), basis points, SpiceDB ZedTokens, response envelope shape.
+- [Workspaces](https://docs.luxxon.dev/concepts/workspaces): Multi-tenancy primitive. One wallet, one workspace, many keys.
+- [API keys](https://docs.luxxon.dev/concepts/api-keys): Workspace-scoped bearer tokens. TEST-only today; LIVE lights up when mainnet ships.
+- [Operators](https://docs.luxxon.dev/concepts/operators): Supply side. WHIP publishers — phones, drones, fixed cameras, PTZ.
+- [Sessions](https://docs.luxxon.dev/concepts/sessions): State machine — `REQUESTED → ASSIGNED → LIVE → ENDED` plus the EIP-712 authorize step.
+- [Pricing](https://docs.luxxon.dev/concepts/pricing): Per-second dynamic rate (supply × demand × corridor). Quote-locked or spot.
+- [Wallet](https://docs.luxxon.dev/concepts/wallet): Workspace wallet on Base. Funding paths, USDC allowance to `LuxxonSettlement`.
+- [Settlement](https://docs.luxxon.dev/concepts/settlement): On-chain primitive. EIP-712 caps, relayer flow, contract guarantees.
+- [Config](https://docs.luxxon.dev/concepts/config): `GET /config` for active chain id, RPC, USDC + LuxxonSettlement addresses.
+- [Trust model](https://docs.luxxon.dev/concepts/trust-model): Operator attestation tiers + the agent decision-risk framing.
+- [Non-crypto users](https://docs.luxxon.dev/concepts/non-crypto-users): Coinbase Smart Wallet + Onramp path for buyers without crypto.
+
+## Integrate
+
+- [Console](https://docs.luxxon.dev/concepts/console): Browser dashboard at console.luxxon.dev — workspace + keys + wallet + sessions.
+- [MCP](https://docs.luxxon.dev/concepts/mcp): `@luxxon/mcp` — the agent-native integration surface. Install line + tool catalogue.
+- [SDKs](https://docs.luxxon.dev/concepts/sdks): `@luxxon/sdk` TypeScript client. Pure fetch, no extra runtime.
+
+## API reference
+
+The full OpenAPI 3 spec is auto-generated from the live API at [docs.luxxon.dev/api-reference](https://docs.luxxon.dev/api-reference). 28 paths, 42 schemas; covers auth, workspaces, API keys, sessions, pricing, wallet, settlements, config, and coverage.
+
+For programmatic spec consumption: [api.luxxon.dev/api/v1/docs-json](https://api.luxxon.dev/api/v1/docs-json).

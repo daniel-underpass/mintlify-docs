@@ -1,0 +1,140 @@
+---
+title: Operators
+description: The supply side. Anything that can publish a live video stream from a known location.
+---
+
+
+An **operator** is one physical agent capable of producing a live video
+feed from a known place: a phone, a drone, a fixed camera, a ground
+robot. Operators belong to a **supplier workspace** — a workspace with
+`SUPPLIER` in its `roles`.
+
+## Operator vs. supplier workspace
+
+These are two different objects:
+
+| Object | What it is |
+|---|---|
+| **Operator workspace** | A workspace with `SUPPLIER` role. Has a Base wallet, API keys, members. Owns the API contract. |
+| **Operator** | An individual device/asset within the workspace. A fleet of drones is one workspace and many operators. |
+
+For the smallest case (one phone, one human), workspace and operator
+are 1:1. For fleets, one workspace operates many.
+
+<Note>
+In early access, operator-as-asset registration is partially built
+— the FK exists in the schema, the management endpoints don't yet.
+A session today is accepted at the **workspace** level; per-operator
+assignment is the next refinement.
+</Note>
+
+## Becoming a supplier
+
+Create a workspace with `SUPPLIER` in `roles` — public endpoint, the
+signature in the body is the auth:
+
+```bash
+curl -X POST .../workspaces \
+  -d '{
+    "slug": "acme-drones",
+    "name": "Acme Drone Co",
+    "walletAddress": "0x...",
+    "signature": "0x...",
+    "nonce": "...",
+    "roles": ["SUPPLIER"]
+  }'
+```
+
+Sign in via SIWE (see [Authentication](/authentication/)) to obtain
+an `lx_session` cookie, then mint an API key with `sessions:operate`:
+
+```bash
+curl -X POST .../workspaces/$ID/api-keys \
+  -b cookies.txt \
+  -d '{
+    "label": "drone-fleet-prod",
+    "environment": "LIVE",
+    "scopes": ["sessions:operate", "sessions:read", "wallet:read"]
+  }'
+```
+
+That key is what your fleet software uses on every `accept` / `start`
+/ `end` call.
+
+## Stream protocol
+
+Operators publish over **WHIP** (WebRTC HTTP Ingest Protocol). Any
+compliant encoder works — Larix Broadcaster, OBS WebRTC, GStreamer
+with the WebRTC plugin, a drone's onboard payload software, the
+browser's `getUserMedia` (see *Publish from a browser* below).
+
+```
+POST <whipUrl>
+Content-Type: application/sdp
+```
+
+The `whipUrl` is returned by `POST /sessions/:id/start` and is
+re-fetchable mid-session via `GET /sessions/:id/producer-token`
+(operator only). URLs are stable for the lifetime of the underlying
+Cloudflare Stream `live_input`; a publisher reconnecting after a
+crash just re-POSTs the SDP offer to the same URL — no new
+session lifecycle call needed.
+
+### Publish from a browser
+
+For demos, smoke tests, or operators on phones, the console hosts
+a one-page browser publisher:
+
+```
+https://console.luxxon.dev/publish/<sessionId>
+```
+
+The page authenticates via the operator's wallet (SIWE), pulls
+the WHIP URL via `/producer-token`, opens `getUserMedia`
+(rear-cam preferred on mobile) + microphone, and negotiates a
+WebRTC publish. Start/stop is two clicks; the camera picker shows
+up when multiple cameras are present. The same lx-session cookie
+that gates the dashboard gates this page — no separate auth.
+
+## Telemetry contract
+
+Operators publish **position telemetry** alongside the video. Spec'd
+in [Trust model / Tier 1](/concepts/trust-model/#tier-1--telemetry-luxxon-sdk-in-roadmap):
+
+```json
+POST /sessions/:id/telemetry
+{
+  "capturedAt": "2026-05-13T08:42:00.123Z",
+  "point": { "lat": 4.711, "lng": -74.072 },
+  "accuracyMeters": 4,
+  "source": "gps",
+  "signature": "0x..."
+}
+```
+
+≥ 1 Hz. The meter consults this log second-by-second at `end` —
+seconds without a fresh in-geofence sample become `failedSeconds`
+(non-billable, no earning, no fee).
+
+## Earnings
+
+Every chargeable second of a session credits the operator workspace's
+wallet:
+
+```
+operator_earned = cleanSeconds × ratePerSecond × (10000 − feeBps) / 10000
+```
+
+Settlement is atomic: the same on-chain transaction that takes the
+fee delivers the operator's share. No batched payouts, no
+reconciliation window. See [Settlement](/concepts/settlement/).
+
+## What we accept today vs roadmap
+
+| Today | Roadmap |
+|---|---|
+| Workspace-level accept/start/end | Per-operator dispatch + selection |
+| Wall-clock meter | Telemetry-anchored meter |
+| Public WHIP/WHEP contract documented | Edge tokens minted at `start` |
+| One wallet per workspace | (unchanged — by design) |
+| C2PA-signed frames pass through unchanged | First-class provenance flag in session response |

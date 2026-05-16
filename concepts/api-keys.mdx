@@ -1,0 +1,97 @@
+---
+title: API keys
+description: Per-workspace credentials with scopes. The machine half of wallet-or-key auth.
+---
+
+API keys are how machines call Luxxon. wallet sessions are for humans
+(developer console + reference apps); keys are for everything else.
+
+Mint, list, and revoke keys at [**console.luxxon.dev**](https://console.luxxon.dev)
+or via the API. The plaintext is shown **once** at mint time — store
+it then.
+
+## Format
+
+```
+lxxn_test_3a91kF_xY7nQ8KdEt2Pm0fLqR4VwTuYzNbHsJcAg
+```
+
+| Segment | Meaning |
+|---|---|
+| `lxxn_` | Luxxon brand prefix |
+| `test` / `live` | Environment. See note below. |
+| `3a91kF` | First 6 hex chars of the owning workspace id — visual ownership at a glance. Not used for routing. |
+| `xY7nQ8…` | 32 bytes of random, base62-encoded. |
+
+The server stores `sha256(plaintext)`. The plaintext is returned **once**
+at creation — display it and persist it; we cannot recover it later.
+
+<Note>
+**`environment: TEST` is the only option today.** The platform runs
+exclusively on Base Sepolia testnet — `LIVE` keys would imply
+mainnet routing that doesn't exist yet. The API rejects
+`environment: "LIVE"` with `INVALID_INPUT` until mainnet ships.
+Hit [`GET /config`](https://api.luxxon.dev/api/v1/config) to confirm
+the active chain.
+</Note>
+
+## Scopes
+
+Each key carries one or more scopes. Endpoints declare what they
+require; keys present what they hold.
+
+| Scope | Allows |
+|---|---|
+| `sessions:read` | GET on sessions, list, settlements |
+| `sessions:create` | POST a new session (consumer side), DELETE to cancel |
+| `sessions:operate` | accept / start / end (operator side) |
+| `pricing:read` | Get a price quote |
+| `wallet:read` | Read wallet state + on-chain events ledger |
+| `operators:write` | Register/update operators in the workspace (planned) |
+| `coverage:write` | Set/update operator coverage zone (planned) |
+| `webhooks:write` | Manage webhook subscriptions (planned) |
+
+Typical consumer key: `sessions:read` + `sessions:create` + `pricing:read`
++ `wallet:read`. Typical operator key: `sessions:operate` +
+`sessions:read` + `wallet:read`.
+
+## Rotation
+
+Generate a new key, mark the old as revoked. The revoked key keeps
+working for a **60-second grace window** — long enough for a rolling
+deploy to pick up the new value without dropping in-flight requests.
+Past `gracePeriodEnd`, the revoked key returns `REVOKED_API_KEY`.
+
+```bash
+# 1. Mint new — wallet session cookie required (humans, not keys)
+curl -X POST .../workspaces/$ID/api-keys \
+  -b cookies.txt \
+  -d '{"label":"prod-2026-05","environment":"TEST","scopes":["sessions:create","sessions:read"]}'
+
+# 2. Deploy new key
+# (your CD system updates env var, rolling restart...)
+
+# 3. Revoke old
+curl -X POST .../workspaces/$ID/api-keys/$OLD_ID/revoke \
+  -b cookies.txt
+```
+
+## What a key cannot do
+
+- Act on a workspace it isn't bound to. The key's `workspaceId` is the
+  membership claim — the URL param, body field, or implicit context
+  must match it.
+- Modify itself. Listing and revoking keys requires wallet session console
+  auth, not key auth (no scope grants this on purpose).
+- Bypass scopes by being live vs test. `test` keys aren't more
+  privileged — they're routed at the same gates with the same scope
+  checks.
+
+## How keys appear in logs
+
+We log `keyId` (UUID) and `workspaceId` on every request. The plaintext
+is never logged. If you've leaked a key, revoking it is the only mitigation
+— there's nothing else for an attacker to derive.
+
+See [/workspaces/:id/api-keys](/reference/api-keys/) for the
+endpoint reference.

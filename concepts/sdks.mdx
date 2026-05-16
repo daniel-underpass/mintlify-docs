@@ -1,0 +1,148 @@
+---
+title: "SDKs"
+description: "TypeScript first; Python, Go, Swift, Kotlin, CLI on deck. Pick the one that matches your stack."
+icon: "code"
+keywords: ["sdk", "typescript", "@luxxon/sdk", "npm", "node", "client library", "fetch", "requestLiveView"]
+boost: 3
+---
+
+The Luxxon API is REST — you can integrate against it with `curl`
+alone. Official SDKs wrap that surface with typed signatures,
+idiomatic helpers, and the same auth + error model in every
+language.
+
+## Available today
+
+### `@luxxon/sdk` (TypeScript / JavaScript)
+
+Pure-`fetch` HTTP client. ESM + types, no native dependencies,
+works in Node ≥18 and modern browsers. Tracks the full public REST
+surface (11 resources, ~32 methods) — anything you can do with
+`curl` you can do here in one typed call.
+
+```bash
+npm install @luxxon/sdk
+```
+
+```ts
+import { Luxxon } from "@luxxon/sdk";
+
+const lx = new Luxxon({ apiKey: process.env.LUXXON_API_KEY });
+
+// Headline: open a session, dispatch an operator, wait for LIVE.
+const { session, viewer } = await lx.requestLiveView({
+  lat: 4.71, lng: -74.05,
+  maxDurationSeconds: 30,
+});
+
+// Pull the latest decoded frame as JPEG bytes
+const { bytes, contentType } = await lx.sessions.frame(session.id);
+// Hand `bytes` to any vision model
+
+// Or hand `viewer.whepUrl` to a WebRTC player for a live stream
+console.log(viewer.whepUrl);
+
+// End it whenever
+await lx.sessions.end(session.id);
+```
+
+#### Resources
+
+| Resource | Methods |
+|---|---|
+| `lx.auth` | `challenge / login / selectWorkspace / logout` |
+| `lx.me` | `get` |
+| `lx.config` | `get` |
+| `lx.health` | `get` |
+| `lx.coverage` | `list` |
+| `lx.demand` | `heatmap` |
+| `lx.pricing` | `quote` |
+| `lx.workspaces` | `challenge / create / list / get / update / setAvailability / heartbeat / createApiKey / revokeApiKey` |
+| `lx.sessions` | `create / list / get / dispatch / accept / start / end / cancel / frame / viewerToken / producerToken / waitFor` |
+| `lx.wallet` | `get / events` |
+| `lx.settlements` | `get` |
+
+Plus one top-level convenience:
+
+- `lx.requestLiveView({ lat, lng, maxDurationSeconds })` —
+  orchestrates `create + dispatch + waitFor(LIVE) + viewerToken`
+  in one call.
+
+For anything not exposed yet, drop to the escape hatch:
+
+```ts
+const data = await lx.json("/some-new-endpoint");
+const res  = await lx.raw("/some-new-endpoint", { method: "POST" });
+```
+
+#### Auth
+
+API key (server-side), wallet-session cookie (browser), or a
+pre-formatted bearer header:
+
+```ts
+new Luxxon({ apiKey: "lxxn_test_..." });
+new Luxxon({ bearer: "Bearer lxxn_test_..." });
+new Luxxon({ cookie: "lx_session=eyJ..." });   // browser / SSR
+```
+
+#### Errors
+
+Errors are typed with a stable `code`:
+
+```ts
+import type { LuxxonError } from "@luxxon/sdk";
+
+try {
+  await lx.sessions.frame(id);
+} catch (err) {
+  const e = err as LuxxonError;
+  if (e.code === "FRAME_NOT_AVAILABLE") {
+    // first keyframe hasn't arrived — retry in 1s
+  } else if (e.code === "NO_COVERAGE") {
+    // no operator in range
+  }
+}
+```
+
+See the [errors page](/reference/errors) for the full code set.
+
+### `@luxxon/mcp` (MCP server)
+
+Built on `@luxxon/sdk`. Exposes 12 agent-callable tools including
+`request_live_view` as the headline. See the
+[MCP page](/concepts/mcp) for setup.
+
+## On deck
+
+Generated from the same OpenAPI spec the TS SDK targets; ergonomics
+will mirror the patterns above.
+
+- **Python** — `pip install luxxon`. Pydantic models, async support
+  via `httpx`. Lands when there's a real agent stack asking for it
+  (most Python agent code today uses an HTTP client + `httpx`
+  directly anyway).
+- **Go** — `github.com/luxxon-dev/luxxon-go` (placeholder).
+  Standard `net/http`, no third-party deps.
+- **CLI** — `npx @luxxon/cli` thin wrapper over the TS SDK. Useful
+  for incident response + scripting.
+- **Swift / Kotlin** — for native operator-side apps. Ships once
+  there's a real iOS/Android producer story (today, browser WHIP
+  is the only client).
+
+## How the SDK avoids wallet popups
+
+The pool-model settlement on `LuxxonSettlement` v3 means the SDK
+**never asks for a per-call signature**. The one-time `approve` +
+`deposit` to fund the pool is a normal viem / ethers / Smart Wallet
+flow done outside the SDK (in the [console](https://console.luxxon.dev)
+or via your own wagmi setup); after that, every `sessions.create`
++ `sessions.end` charges the pool transparently. Fleet deployments
+where the agent doesn't hold a key just point the agent's API key
+at a workspace whose pool the operator pre-funded.
+
+## Source
+
+- `github.com/luxxon-dev/luxxon-sdk` — TypeScript SDK + MCP
+  server source, MIT licensed
+- Issues + feature requests via the repo

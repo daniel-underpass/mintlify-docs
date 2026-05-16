@@ -1,0 +1,125 @@
+---
+title: Errors
+description: Every error code the Luxxon API can emit, what it means, and what to do about it.
+icon: "octagon-alert"
+keywords: ["errors", "error codes", "status codes", "INVALID_INPUT", "NOT_AUTHORIZED", "NO_COVERAGE", "FRAME_NOT_AVAILABLE", "INVALID_STATE", "luxxon errors"]
+---
+
+Errors always come back in the same envelope:
+
+```json
+{
+  "statusCode": 403,
+  "code": "NOT_AUTHORIZED",
+  "message": "Not authorized for this operation",
+  "detail": "session:viewDenied",
+  "timestamp": "2026-05-13T08:30:00Z"
+}
+```
+
+Branch on `code` — it's the stable machine-readable handle.
+`message` is human-readable but English-only; the API doesn't
+localize. `detail` is operation-specific context (which session,
+which scope, which state) for diagnostics, **not** a user-facing
+string.
+
+The HTTP `statusCode` correlates with the family but isn't the
+contract — multiple codes can share a status (`403` covers
+`NOT_AUTHORIZED`, `NOT_OPERATOR`, `NOT_YOUR_SESSION`).
+
+## How to handle them
+
+```ts
+import { Luxxon, type LuxxonError } from "@luxxon/sdk";
+
+try {
+  const { session, viewer } = await lx.requestLiveView({
+    lat: 4.71, lng: -74.05, maxDurationSeconds: 30,
+  });
+} catch (err) {
+  const e = err as LuxxonError;
+  switch (e.code) {
+    case "NO_COVERAGE":
+      // No operator in range. Try a wider zone or wait + retry.
+      break;
+    case "INSUFFICIENT_CREDIT":
+      // Pool balance too low. Top up via the console.
+      break;
+    case "INVALID_STATE":
+      // Session moved on while we were calling.
+      break;
+    default:
+      throw err;
+  }
+}
+```
+
+## Auth + authorization
+
+| Code | Status | What it means | What to do |
+|---|---|---|---|
+| `NOT_AUTHENTICATED` | 401 | Missing / expired credential. | Re-mint an API key or re-do the SIWE login. |
+| `NOT_AUTHORIZED` | 403 | Caller has no permission for the resource. | Check workspace membership / API-key scopes. |
+| `INSUFFICIENT_SCOPE` | 403 | API key is missing the scope this endpoint needs. | Mint a new key with the right scope set. |
+| `NOT_OPERATOR` | 403 | Operator-only endpoint, caller isn't one. | Use an operator workspace. |
+| `NOT_YOUR_SESSION` | 403 | Caller is neither consumer nor operator of the session. | Verify you're querying the right session id. |
+
+## Domain rules
+
+| Code | Status | What it means | What to do |
+|---|---|---|---|
+| `INVALID_INPUT` | 400 | Body / query failed validation. `detail` says which field. | Fix the payload. |
+| `INVALID_STATE` | 409 | Operation not allowed in the session's current state. | Read the current state via `get_session` and retry the right transition. |
+| `CONFLICT` | 409 | Resource conflict (e.g. monotone sequence violation on a heartbeat). | Resolve the conflict server-side (newer sequence, different slug) and retry. |
+| `NO_COVERAGE` | 503 | No ONLINE operator covers the requested point. | Widen the request, try a different zone, or wait for an operator to come online. |
+| `OUTSIDE_COVERAGE` | 400 | Requested point is outside the operator's declared coverage circle. | Move the request inside the operator's range. |
+| `UNAVAILABLE` | 503 | Dispatch found no idle operator. | Retry shortly. |
+| `FRAME_NOT_AVAILABLE` | 404 | No decoded frame yet — either the first keyframe hasn't landed or the publisher disconnected. | Retry in 1-2s; ~3-5s warmup after `request_live_view` resolves is normal. |
+
+## Wallet + settlement
+
+| Code | Status | What it means | What to do |
+|---|---|---|---|
+| `NO_CREDIT` | 400 | Workspace pool balance is zero. | Top up via the console. |
+| `INSUFFICIENT_CREDIT` | 400 | Pool balance won't cover the requested duration at the current rate. | Top up or shorten `maxDurationSeconds`. |
+
+## Not-found
+
+| Code | Status | What it means |
+|---|---|---|
+| `NOT_FOUND` | 404 | Generic — the URL resolved but the resource id is unknown. |
+| `SESSION_NOT_FOUND` | 404 | The given `sessionId` doesn't exist (or was hard-deleted). |
+| `OPERATOR_NOT_FOUND` | 404 | Unknown operator id. |
+| `COVERAGE_AREA_NOT_FOUND` | 404 | Legacy coverage area lookup. |
+| `ACCOUNT_NOT_FOUND` | 404 | Legacy account lookup. |
+
+## Infrastructure (5xx)
+
+These mean **our** side is sad, not yours. Safe to retry with
+backoff.
+
+| Code | Status | What it means |
+|---|---|---|
+| `DATABASE_ERROR` | 503 | Postgres unavailable. |
+| `AUTHZ_ERROR` | 503 | SpiceDB unavailable. |
+| `VIDEO_ERROR` | 503 | Cloudflare Stream unavailable. |
+| `QUEUE_ERROR` | 503 | Background job queue unavailable. |
+| `EXTERNAL_ERROR` | 502 | A downstream API didn't respond. |
+| `PAYMENT_ERROR` | 502 | A downstream payment processor didn't respond. (Reserved.) |
+| `INTERNAL_SERVER_ERROR` | 500 | Unexpected — please file an issue with the timestamp + request id. |
+
+## Versioning + new codes
+
+Codes are append-only — once shipped, a code keeps its meaning.
+New ones may appear; if you `switch` on `code`, fall through to a
+generic handler for the default case (don't crash on unknown
+codes).
+
+```ts
+default:
+  // Unknown code — log + surface to the user as a generic error.
+  console.error("luxxon: unknown error", e.code, e.message);
+```
+
+See [`@luxxon/sdk`](/concepts/sdks)'s `LuxxonErrorCode` type for
+the typed enum — it tracks this page.

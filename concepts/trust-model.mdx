@@ -1,0 +1,121 @@
+---
+title: Trust model
+description: How we know the operator is at the spot the consumer paid for.
+---
+
+
+The fundamental risk in a real-world video marketplace: the operator
+claims they're at a place but isn't. Stock footage, pre-recorded
+clips, mock GPS — all in the threat model. Luxxon doesn't try to
+prove physical presence with software (you can't). It makes fraud
+expensive through layered defenses, and prices it out of the unit
+economics.
+
+## Defense layers
+
+### Tier 0 — Physics signals (free, ride on WHIP/WHEP)
+
+- **Edge RTT.** Operators claim Bogotá but stream from Singapore?
+  The round-trip to the nearest WHIP edge node will betray them.
+- **IP geolocation.** Stated point in a different continent from the
+  publisher's IP → reject at admission.
+
+These constrain rather than pinpoint. Free, in the pipe by default.
+
+### Tier 1 — Telemetry (Luxxon SDK, in roadmap)
+
+Operator device emits a signed beacon at ≥ 1 Hz with:
+
+```json
+{
+  "capturedAt": "2026-05-13T08:42:00.123Z",
+  "point": { "lat": 4.7110, "lng": -74.0721 },
+  "accuracyMeters": 4.2,
+  "source": "gps",
+  "sensors": {
+    "accel": [...], "gyro": [...], "baro": ...,
+    "cellTowerId": "...", "wifiBssidNeighbors": [...]
+  },
+  "signature": "0x..."
+}
+```
+
+Movement plausibility checks: 200 km/h pedestrian → reject.
+Zero sensor noise → simulator. IMU spoofing requires a full hardware
+emulator, not a `setMockLocation()` call. Bar goes from "minutes" to
+"hours" of fraud effort.
+
+### Tier 2 — Active challenges (cheap, kills pre-recorded)
+
+- Server pushes a random QR overlay to the operator device every 30s.
+  Pre-recorded footage can't contain a code that didn't exist a
+  minute ago.
+- On-demand directional challenges ("look left", "show your watch")
+  — operator complies in ≤ 5s or the session is QoS-failed
+  (non-billable seconds).
+
+### Tier 3 — Edge enforcement (the cheapest place to *enforce*)
+
+The WHIP/WHEP edge will admit `start` only if:
+- A fresh telemetry sample exists in the last N seconds, AND
+- That sample is inside the session's `geofenceRadiusMeters` of the
+  requested point.
+
+During LIVE, the meter consults the telemetry log second-by-second.
+Any tick without a fresh in-geofence sample becomes `failedSeconds`
+— non-billable for the consumer, no earning for the operator, no fee
+for the platform. **Failed seconds are the platform's pricing
+discipline.**
+
+### Tier 4 — Economic (Phase 3, deferred)
+
+Operators stake USDC against their reputation. Confirmed fraud
+slashes the stake. Consumer disputes → off-chain review → refund +
+slash. Reputation accrues on-chain once volume justifies. This is
+what makes fraud *cost more than the bounty* — but it needs volume
+to be meaningful, so it ships later.
+
+### Tier 5 — Hardware provenance (long-tail)
+
+[C2PA Content Credentials](https://c2pa.org/) cameras sign frames
+with a hardware key. Sony, Nikon, Leica, AP, Reuters all use this for
+journalism-grade provenance. Overkill for the median session,
+essential for insurance/journalism/legal customers.
+
+## What's enforced right now
+
+| Layer | Status |
+|---|---|
+| Edge RTT / IP geo | Ships with WHIP/WHEP edge |
+| Telemetry beacon contract | Spec'd; ingest endpoint + meter integration in flight |
+| Geofence radius (50m default, 500m cap) | Schema in place; enforcement landing with telemetry |
+| Active challenges | Roadmap |
+| Stake + slash | Phase 3 |
+| C2PA frames | Customer-specific opt-in |
+
+<Note>
+**Trust is the product.** Stock footage marketplaces exist. What
+Luxxon sells is a credible live feed from a specific spot at a
+specific time. The defenses above are features — surface them to
+insurance, journalism, and inspection buyers; they pay precisely for
+verifiable provenance.
+</Note>
+
+## Implications for integrators
+
+**Operator-side:** to fulfill sessions on Luxxon at scale you'll need
+to emit telemetry at the rate documented in the
+[telemetry reference](/reference/sessions/#telemetry). The Luxxon SDK
+(roadmap) wraps this; raw integration is one signed POST per second.
+
+**Consumer-side:** you can rely on the meter. `cleanSeconds` ×
+`ratePerSecond` is exactly what you're billed for. `failedSeconds`
+are free.
+
+## Indoor / RF-shielded / jamming
+
+| Case | Handling |
+|---|---|
+| Indoor / Wi-Fi positioning | Allow `source: "fused"` with widened `accuracyMeters`; geofence widens proportionally. A 100m geofence over a 50m mall feed still works. |
+| Tunnels, deep buildings, RF-shielded | Out of scope in early access. Document on roadmap. |
+| Active GPS jamming regions | Out of scope. Operators in those zones get an explicit "unsupported region" response at session create. |

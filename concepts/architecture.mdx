@@ -1,0 +1,109 @@
+---
+title: Architecture
+description: How the Luxxon platform fits together end to end.
+---
+
+
+Luxxon is a marketplace API for live video from real places. This page is
+the wide-angle view of what runs where.
+
+## End-to-end shape
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                       Luxxon API surface                        │
+│                       api.luxxon.dev/api/v1                     │
+└─────────────┬─────────────────────────────────┬─────────────────┘
+              │                                 │
+              │ wallet session            lxxn_* API
+              │ cookie (humans)          key (machines)
+              ▼                                 ▼
+       ┌──────────────────────────┬───────────────────────────────┐
+       │  Wallet-or-key auth guard │  Workspace = unit of tenancy │
+       └────────┬─────────────────┴────────┬──────────────────────┘
+                │                 │
+                │                 │ SpiceDB (Zanzibar)
+                │                 │ permission graph
+                │                 ▼
+       ┌────────▼─────────────────────────────────────────┐
+       │   workspaces · api-keys · pricing · sessions      │
+       │   wallet · settlements · /me                       │
+       └────────┬───────────────────────────┬─────────────┘
+                │                           │
+                │ Postgres + PostGIS        │ Base (USDC)
+                │ (data layer)              │ via LuxxonSettlement
+                ▼                           ▼
+       ┌────────────────────┐      ┌────────────────────┐
+       │  Workspaces        │      │  Consumer wallet   │
+       │  Sessions          │      │      │             │
+       │  Quotes / Events   │      │      ▼             │
+       │  Telemetry         │      │  Operator wallet   │
+       └────────────────────┘      │   + Platform fee   │
+                                    └────────────────────┘
+```
+
+Two surfaces hit the same API: a developer console (humans, signed
+`lx_session` cookie after a SIWE sign-in) and machine integrations
+(`lxxn_*` API keys via `Authorization: Bearer`). Both land in a
+workspace, the unit of multi-tenancy. Authorization splits cleanly:
+SpiceDB answers *which resources is this principal entitled to*,
+scopes answer *which verbs is this credential allowed to emit*. See
+[Authentication](/authentication/) for the full split.
+
+## Layers
+
+| Layer | What it does |
+|---|---|
+| **Wallet-or-key auth guard** | Two paths. `Authorization: Bearer lxxn_*` → sha256 lookup against `LxApiKey`. Otherwise, `Cookie: lx_session=…` → constant-time HMAC verification of the signed payload. Either way, attaches `req.lxAuth = { kind, principal }`. |
+| **Workspace** | Multi-tenancy root. Holds wallet, API keys, members, role flags (`CONSUMER`, `SUPPLIER`, or both). |
+| **Pricing** | Per-second µUSDC rates with a quote-locked flow. Dynamic factors (supply, demand, corridor) compose with `base_rate` in basis-points arithmetic. |
+| **Sessions** | Atomic unit of work. State machine `REQUESTED → ASSIGNED → LIVE → ENDED` with `CANCELLED` as the pre-LIVE escape. CAS state transitions guarantee race safety. `create` reads the consumer wallet's on-chain pool balance and rejects with `INSUFFICIENT_CREDIT` if `rate × maxDuration` isn't covered. `accept` is a single state flip — no signature step. |
+| **Wallet** | Read-only view of `LxWalletState` + on-chain events ledger. Tracks the consumer's pool balance via `LxOnChainEvent` rows of kind `DEPOSIT` / `WITHDRAWAL` / `SETTLE`. |
+| **Settlements** | At session `end`, the API composes the exact payload the relayer will pass to `LuxxonSettlement.settleFromPool()`. State: `NOT_READY → PENDING → CONFIRMED`. |
+
+## Storage
+
+| Store | Used for |
+|---|---|
+| PostgreSQL + PostGIS | Everything in the data layer. Geography points for session location, on-chain event ledger, append-only telemetry log. |
+| SpiceDB | Authorization graph (Zanzibar). Workspace membership, session viewership across consumer/operator workspaces. |
+| Base | USDC ledger + `LuxxonSettlement` contract. The platform never holds funds — settlements move USDC directly from consumer to operator + platform fee in one atomic tx. Smart Wallet + Coinbase Onramp + paymasters make this work for non-crypto users (see [Non-crypto users](/concepts/non-crypto-users/)). |
+
+## What's a "session"
+
+The thing the marketplace exists to deliver:
+
+1. A consumer says *"give me a live view of `(lat, lng)` for up to N
+   seconds."*
+2. An operator (the supplier) accepts the session and starts streaming
+   from that point.
+3. The platform meters seconds where the stream is healthy *and* the
+   operator is in-geofence (telemetry-backed).
+4. On end, the meter is final and a settlement payload is composed.
+5. A relayer submits the on-chain settlement: consumer wallet →
+   operator wallet (less platform fee).
+
+Five steps. The rest of the docs is how each step is wired.
+
+## What's NOT in the platform
+
+<Note>
+Knowing the non-goals is half the architecture.
+</Note>
+
+- **Custody.** Luxxon never holds USDC. Funds move directly between
+  wallets via a thin settlement contract.
+- **KYC.** Wallet addresses are the identity. No identity provider, no
+  legal entity binding.
+- **Multi-currency.** USDC only. Bridge later when volume justifies.
+- **Mobile SDKs you must use.** The contract is WHIP/WHEP + REST. Any
+  WebRTC-capable encoder + any HTTPS client works.
+- **Fiat on-ramps.** Consumers bring USDC. Reference apps may
+  on-ramp on their own behalf; the platform doesn't.
+
+## Where to go next
+
+- [Authentication](/authentication/) — the wallet-or-key auth model
+- [Workspaces](/concepts/workspaces/) — the tenancy primitive
+- [Sessions](/concepts/sessions/) — the lifecycle in detail
+- [Conventions](/concepts/conventions/) — BigInt-as-strings, ZedTokens, basis points

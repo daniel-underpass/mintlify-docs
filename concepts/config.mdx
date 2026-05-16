@@ -1,0 +1,71 @@
+---
+title: Config
+description: A single public endpoint that tells clients which chain + contracts the platform is wired to.
+---
+
+The active settlement chain isn't a thing clients should hard-code.
+We mint contracts, swap chains, and (eventually) flip from testnet
+to mainnet — every move needs every SDK and console to follow without
+a coordinated release.
+
+`GET /api/v1/config` is the single source of truth for these values.
+Public, unauthenticated, no secrets leaked.
+
+## Shape
+
+```bash
+curl https://api.luxxon.dev/api/v1/config
+```
+
+```json
+{
+  "environment": "TEST",
+  "chainId": 84532,
+  "chainName": "Base Sepolia",
+  "rpcUrl": "https://sepolia.base.org",
+  "explorerUrl": "https://sepolia.basescan.org",
+  "usdcAddress": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+  "settlementAddress": "0x277F58B145Ed7BF2..."
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `environment` | `TEST` (Base Sepolia) or `LIVE` (Base mainnet — not active yet). |
+| `chainId` | EVM chain id of the active settlement chain. |
+| `chainName` | Human label. |
+| `rpcUrl` | Public RPC. Fine for reads; bring your own for write throughput. |
+| `explorerUrl` | Block explorer base — append `/tx/<hash>` or `/address/<addr>`. |
+| `usdcAddress` | ERC-20 contract for USDC on this chain. 6 decimals — values are µUSDC. |
+| `settlementAddress` | `LuxxonSettlement` contract. Consumers `approve()` USDC to this address once, then call `deposit(amount)` to fund the per-session pool. Sessions debit this contract automatically; `withdraw(amount)` pulls the balance back. |
+
+## Who reads it
+
+- **The console** (`console.luxxon.dev`) reads `/config` once per
+  workspace dashboard load — drives the *Wallet* panel's on-chain
+  reads (USDC balance, pool balance via
+  `LuxxonSettlement.deposits()`) and the `deposit` / `withdraw`
+  writes.
+- **`@luxxon/sdk`** reads it at first use so callers don't have to
+  pass contract addresses.
+- **MCP servers** read it on startup so agents calling
+  `request_live_view` learn the active chain without server-side
+  configuration drift.
+- **Your own integration** — read it once at boot, cache for the
+  process lifetime; the values are stable on the order of weeks
+  during a chain or contract migration window.
+
+## When values change
+
+Two cases:
+
+1. **Contract upgrade.** A new `LuxxonSettlement` deploys; the env
+   var on `lx-api` flips; `/config` returns the new address.
+   Consumers re-`approve()` and re-`deposit()` against the new
+   contract (old pool balances stay in the old contract and can be
+   withdrawn there). The console surfaces a banner; SDKs should
+   refresh their cache.
+2. **Mainnet cutover.** `chainId` flips from `84532` → `8453`,
+   `environment` flips from `TEST` → `LIVE`. New `LIVE` API keys
+   become mintable. Existing `TEST` keys keep working against the
+   Sepolia deploy until you decommission the testnet stack.

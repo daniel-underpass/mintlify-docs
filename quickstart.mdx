@@ -1,0 +1,274 @@
+---
+title: Quickstart
+description: From zero to a settled session — pick the console UI or curl.
+keywords: ["quickstart", "getting started", "tutorial", "first session", "siwe", "api key", "wallet", "curl"]
+boost: 5
+---
+
+Two equivalent paths. Pick the one that matches how you're integrating.
+
+## Option A — Console (browser wallet)
+
+If you've got a browser wallet (MetaMask, Coinbase, Rabby, etc.):
+
+1. Open [**console.luxxon.dev**](https://console.luxxon.dev)
+2. Connect wallet → sign the SIWE challenge
+3. **New workspace** → pick a slug, name, and role (CONSUMER / SUPPLIER) → sign
+4. **Mint key** → save the plaintext (it's shown once)
+5. **Wallet → Top up pool** → pick an amount and sign (first top-up is approve + deposit; subsequent ones are just deposit)
+
+You now have an API key + a funded pool. Sessions debit from it
+automatically with zero further signatures. Skip to step 6 below
+to open sessions, or hand the key off to your agent.
+
+## Option B — curl / SDK
+
+This is the wire protocol the SDK wraps. The flow:
+
+```
+challenge → sign → create workspace → mint key → top up pool
+                                                 → create session
+                                                 → accept → start → end
+```
+
+You'll need a wallet's private key (or a passkey-backed Smart Wallet)
+to sign the SIWE challenge. Workspace creation is public — the
+signature itself is the auth.
+
+<Note>
+The API base URL is `https://api.luxxon.dev/api/v1`. Examples
+below use `$API` — `export API=https://api.luxxon.dev/api/v1`.
+
+Today the platform runs on **Base Sepolia testnet only** — every API
+key is `TEST`-scoped. Mainnet (`LIVE` keys) lights up when we cut
+over. Hit [`GET /config`](https://api.luxxon.dev/api/v1/config) for
+the active chain + contract addresses.
+</Note>
+
+<Steps>
+
+1. ### Get a challenge
+
+   No auth — issue a nonce + message bound to your wallet address:
+
+   ```bash
+   curl -X POST $API/workspaces/challenge \
+     -H "Content-Type: application/json" \
+     -d '{"walletAddress":"0xYOUR..."}'
+   ```
+
+   Response carries `nonce`, `message` (the exact bytes to sign), and
+   `expiresAt` (5 min TTL).
+
+2. ### Sign the challenge
+
+   Sign the returned `message` with the wallet's private key. Any
+   SIWE-compatible signer works:
+
+   <Tabs>
+     <TabItem label="viem (Node)">
+   ```ts
+   import { privateKeyToAccount } from "viem/accounts";
+   const account = privateKeyToAccount("0xYOUR_PRIVATE_KEY");
+   const signature = await account.signMessage({ message });
+   ```
+     </TabItem>
+     <TabItem label="ethers">
+   ```ts
+   import { Wallet } from "ethers";
+   const wallet = new Wallet("0xYOUR_PRIVATE_KEY");
+   const signature = await wallet.signMessage(message);
+   ```
+     </TabItem>
+     <TabItem label="MetaMask / Smart Wallet">
+   ```ts
+   const signature = await ethereum.request({
+     method: "personal_sign",
+     params: [message, account.address],
+   });
+   ```
+     </TabItem>
+   </Tabs>
+
+3. ### Create the workspace
+
+   Public endpoint — the signature in the body **is** the auth.
+
+   ```bash
+   curl -X POST $API/workspaces \
+     -H "Content-Type: application/json" \
+     -d '{
+       "slug": "my-eyes",
+       "name": "My Vision Co",
+       "walletAddress": "0xYOUR...",
+       "signature": "0xSIGNED...",
+       "nonce": "FROM_STEP_1",
+       "roles": ["CONSUMER", "SUPPLIER"]
+     }' \
+     -i
+   ```
+
+   `-i` exposes headers — capture `X-Lx-Consistency-Token` (also
+   returned in the body as `consistencyToken`). The response carries
+   the workspace id; save as `$WORKSPACE`.
+
+4. ### Sign in for the dashboard surface (wallet session)
+
+   Minting API keys requires a wallet session — a signed-cookie
+   identity. Two SIWE steps:
+
+   ```bash
+   # 4a. Get a sign-in challenge
+   curl -X POST $API/auth/wallet/challenge \
+     -H "Content-Type: application/json" \
+     -d '{"walletAddress":"0xYOUR..."}'
+
+   # 4b. Sign the returned message, then submit:
+   curl -X POST $API/auth/wallet/login \
+     -H "Content-Type: application/json" \
+     -c cookies.txt \
+     -d '{
+       "walletAddress": "0xYOUR...",
+       "nonce": "FROM_4a",
+       "signature": "0xSIGNED_4a..."
+     }'
+
+   # 4c. Pin the cookie to the workspace
+   curl -X POST $API/auth/workspace/select \
+     -H "Content-Type: application/json" \
+     -b cookies.txt -c cookies.txt \
+     -d "{\"workspaceId\":\"$WORKSPACE\"}"
+   ```
+
+   The `lx_session` cookie in `cookies.txt` is now your dashboard
+   identity. HttpOnly, HMAC-signed, 12h TTL.
+
+5. ### Mint an API key
+
+   Echo the workspace-create ZedToken so the request is guaranteed to
+   see the SpiceDB write:
+
+   ```bash
+   curl -X POST $API/workspaces/$WORKSPACE/api-keys \
+     -b cookies.txt \
+     -H "X-Lx-Consistency-Token: GgYKBENPb1Y=" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "label": "first-key",
+       "environment": "TEST",
+       "scopes": ["sessions:create", "sessions:read",
+                  "sessions:operate", "pricing:read", "wallet:read"]
+     }'
+   ```
+
+   `plaintext` in the response is your API key. **Save it now** —
+   it's never returned again. Store as `$KEY`.
+
+6. ### Top up the pool
+
+   Sessions debit from a pre-funded pool on `LuxxonSettlement`.
+   Top it up once and every subsequent session is signature-free.
+
+   ```ts
+   // viem example — replace with your wallet flow.
+   import { writeContract } from "viem/actions";
+   import { erc20Abi, maxUint256 } from "viem";
+   import { luxxonSettlementAbi } from "@luxxon/contracts-abi";
+
+   // 1) Approve USDC once (max — covers all future top-ups).
+   await writeContract(client, {
+     address: USDC,
+     abi: erc20Abi,
+     functionName: "approve",
+     args: [SETTLEMENT, maxUint256],
+   });
+
+   // 2) Deposit. 5 USDC = 5_000_000 (6 decimals).
+   await writeContract(client, {
+     address: SETTLEMENT,
+     abi: luxxonSettlementAbi,
+     functionName: "deposit",
+     args: [5_000_000n],
+   });
+   ```
+
+   Hit `GET /config` to grab `usdcAddress` + `settlementAddress`
+   for the active chain. The same `LuxxonSettlement.withdraw(amount)`
+   pulls the balance back any time — even during a pause.
+
+7. ### Open a session
+
+   ```bash
+   curl -X POST $API/sessions \
+     -H "Authorization: Bearer $KEY" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "lat": 4.71,
+       "lng": -74.07,
+       "maxDurationSeconds": 60
+     }'
+   ```
+
+   State: `REQUESTED`. Save `id` as `$SID`. Rate is locked at
+   `ratePerSecondMicroUsdc` for the rest of the session. The API
+   reads your pool balance on-chain at this step and returns
+   `INSUFFICIENT_CREDIT` if it can't cover `rate × maxDurationSeconds`.
+
+8. ### Accept + start + end
+
+   For the smoke test, use the same workspace as both consumer and
+   supplier (you set `roles: ["CONSUMER", "SUPPLIER"]` in step 3, so
+   it qualifies on both sides):
+
+   ```bash
+   # accept (REQUESTED → ASSIGNED). No signature step — the pool
+   # already covers the worst-case meter for this session.
+   curl -X POST $API/sessions/$SID/accept \
+     -H "Authorization: Bearer $KEY" -d '{}'
+
+   # start (ASSIGNED → LIVE)
+   curl -X POST $API/sessions/$SID/start \
+     -H "Authorization: Bearer $KEY"
+
+   sleep 3
+
+   # end (LIVE → ENDED)
+   curl -X POST $API/sessions/$SID/end \
+     -H "Authorization: Bearer $KEY"
+   ```
+
+   The final response carries `cleanSeconds`, `chargedMicroUsdc`,
+   and `state: "ENDED"`.
+
+9. ### Inspect the settlement
+
+   ```bash
+   curl $API/settlements/$SID \
+     -H "Authorization: Bearer $KEY"
+   ```
+
+   On testnet you'll see `state: "PENDING"` briefly, then `CONFIRMED`
+   with a `txHash` once the relayer broadcasts. The payload reveals
+   the exact args the relayer passes to
+   `LuxxonSettlement.settleFromPool(sessionId, from, to, rate,
+   seconds, toAmount, feeAmount)` — the contract debits your pool
+   in the same transaction.
+
+</Steps>
+
+## What you just did
+
+You exercised every layer of the platform: SIWE wallet sign-in,
+public signature-authed workspace creation, wallet-session-gated key
+minting, scoped API-key calls, SpiceDB authorization (via ZedTokens),
+per-second pricing, on-chain pool deposit, the session lifecycle, and
+on-chain settlement composition — all without any SDK and with a
+single wallet signature beyond the workspace bootstrap.
+
+## Next
+
+- [Console](https://console.luxxon.dev) — UI for workspace + keys + wallet + sessions
+- [Concepts / Architecture](/concepts/architecture/) — wide-angle view
+- [Concepts / Conventions](/concepts/conventions/) — µUSDC, ZedTokens, basis points
+- [Concepts / MCP](/concepts/mcp/) — let agents request live views via Claude / Cursor
+- [Concepts / SDKs](/concepts/sdks/) — `@luxxon/sdk` for Node/TS

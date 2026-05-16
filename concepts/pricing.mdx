@@ -1,0 +1,103 @@
+---
+title: Pricing
+description: Per-second µUSDC rates, dynamic factors, spot vs quote-locked.
+keywords: ["pricing", "rate", "per second", "dynamic pricing", "supply demand", "basis points", "quote", "usdc"]
+---
+
+
+Luxxon prices in **micro-USDC per second** (`µUSDC/s`). A baseline rate
+gets multiplied by three dynamic factors at the moment a session is
+priced.
+
+## The formula
+
+```
+rate = base × supply_factor × demand_factor × corridor_multiplier
+```
+
+Everything in basis points internally (10000 = 1.0×) to keep settlement
+math in integers — no float drift.
+
+| Term | Source |
+|---|---|
+| `base_rate` | Platform setting. Default: 1000 µUSDC/s ($0.001/s = $0.06/min). |
+| `supply_factor` | `clamp(1 / active_operators_in_range, 0.7×, 3.0×)`. Few operators → surge up. |
+| `demand_factor` | `clamp(1 + open_sessions_in_range / available_operators, 1.0×, 3.0×)`. Busy area → surge up. |
+| `corridor_multiplier` | Per-zone override set by the platform (tourist zones, off-hours, special events). Default 1.0×. |
+
+The clamps prevent runaway pricing — even in the most starved
+combination, the rate caps at `base × 3 × 3 × corridor_max`.
+
+<Warning>
+**During early access**, `supply_factor`, `demand_factor`, and
+`corridor_multiplier` all return `1.0×`. Real factor computation
+lights up once there are operators online to count. The API surface
+and contract are stable; the numbers behind them get more interesting.
+</Warning>
+
+## Two flows: spot and quote-locked
+
+**Spot.** Don't pre-fetch a quote. POST `/sessions` directly; the
+server computes the current rate at request time and stamps it on the
+session. Fastest, no round-trip overhead, no surge guarantee.
+
+```bash
+curl -X POST .../sessions \
+  -H "Authorization: Bearer $KEY" \
+  -d '{"lat":4.71,"lng":-74.07,"maxDurationSeconds":300}'
+```
+
+**Quote-locked.** Pre-fetch a quote, then reference it on create.
+Server validates the quote isn't expired and uses *that* rate. Standard
+pattern for surge-sensitive flows.
+
+```bash
+QUOTE=$(curl -s ".../pricing/quote?lat=4.71&lng=-74.07&durationSeconds=300" \
+  -H "Authorization: Bearer $KEY" | jq -r '.data.quoteId')
+
+curl -X POST .../sessions \
+  -H "Authorization: Bearer $KEY" \
+  -d "{\"lat\":4.71,\"lng\":-74.07,\"maxDurationSeconds\":300,\"quoteId\":\"$QUOTE\"}"
+```
+
+Quotes expire after 30 seconds. Single-use — once consumed by a session
+create, the same `quoteId` returns `pricing:quoteAlreadyUsed` (409).
+
+## Rate-locking through a session
+
+The rate stamped on the session is **immutable for the duration of that
+session**. Surges can rise mid-session but already-running sessions
+keep their locked rate. New sessions opened after the surge see the
+new rate. Operators are paid at the locked rate too — symmetric.
+
+## The settlement math
+
+When a session ends, the meter produces `cleanSeconds` (billable) and
+`failedSeconds` (non-billable, e.g. QoS violations). The amount math:
+
+```
+chargeable_seconds   = cleanSeconds                        # failedSeconds drop out
+operator_share_bps   = 10000 − platform_fee_bps            # default fee 1500 (15%)
+operator_earned      = chargeable_seconds × rate × operator_share_bps / 10000
+platform_fee         = chargeable_seconds × rate × platform_fee_bps  / 10000
+consumer_charged     = operator_earned + platform_fee
+```
+
+These are the `toAmount` / `feeAmount` you'll see on the settlement
+payload at `/settlements/:sessionId`.
+
+## Failed seconds are not billed
+
+If 60 seconds of a session were live but 15 of them had geofence
+breaches or QoS failures, the consumer is charged for 45 seconds and
+the operator earns on 45 seconds. The platform's fee is on 45 seconds.
+Nobody pays for what didn't work.
+
+The discrimination criteria themselves (QoS thresholds, geofence
+radius, telemetry continuity) are documented in
+[Trust model](/concepts/trust-model/) — the short version is *failed
+= measurable platform breach*, not consumer dissatisfaction.
+
+## Currency
+
+USDC on Base. Only. See [Wallet](/concepts/wallet/) for funding flow.

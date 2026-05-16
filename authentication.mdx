@@ -1,0 +1,156 @@
+---
+title: Authentication
+description: Two paths — `lxxn_*` API keys for machines, SIWE wallet signatures for the dashboard.
+keywords: ["authentication", "api keys", "siwe", "sign in with ethereum", "wallet", "bearer token", "lx_session"]
+boost: 3
+---
+
+
+Luxxon is wallet-only. There are no usernames, passwords, or OAuth
+providers. Two ways to authenticate:
+
+| Path | Used by | Carries |
+|---|---|---|
+| **API key** — `Authorization: Bearer lxxn_*` | Server-side integrations, agents, jobs | A workspace identity + scope set |
+| **Wallet session** — `Cookie: lx_session=…` | The dashboard, after a SIWE sign-in | A wallet address + (optionally) a picked workspace and role |
+
+Both paths resolve, at the guard, to a workspace-scoped principal. From
+there, every authorization check is "is this principal entitled to act
+on this resource?" — `workspaceId` is the answer in both cases.
+
+## API keys
+
+```
+Authorization: Bearer lxxn_live_abc123_<secret>
+```
+
+The key is sha256-hashed at rest; the plaintext is shown exactly once,
+at creation time. Keys are scoped to a single workspace and carry a
+list of capability scopes (`sessions:read`, `wallet:read`, etc.) — see
+[API keys](/concepts/api-keys/).
+
+What gets attached to the request:
+
+```ts
+{
+  kind: "api_key",
+  workspaceId, keyId,
+  scopes: ["sessions:read", ...],
+  environment: "LIVE" | "TEST"
+}
+```
+
+Workspace binding is strict: any endpoint that takes a `workspaceId`
+parameter must match the key's bound workspace.
+
+## Wallet sessions (dashboard)
+
+The dashboard signs in by proving control of a wallet, then picking
+which workspace to act as.
+
+```
+POST /api/v1/auth/wallet/challenge
+{ "walletAddress": "0xAbC…" }
+→ { "nonce": "…", "message": "Luxxon — sign in to prove …", "expiresAt": "…" }
+
+POST /api/v1/auth/wallet/login
+{ "walletAddress": "0xAbC…", "nonce": "…", "signature": "0x…" }
+→ Set-Cookie: lx_session=<HMAC-signed payload>
+→ { walletAddress, workspaces: [{ id, slug, name, role }, …] }
+
+POST /api/v1/auth/workspace/select       (requires lx_session cookie)
+{ "workspaceId": "uuid" }
+→ Set-Cookie: lx_session=<re-issued with workspaceId + role>
+→ { workspaceId, role }
+
+POST /api/v1/auth/logout                 → clears the cookie
+```
+
+The cookie is an HMAC-signed payload (no server-side state), 12-hour
+TTL, `HttpOnly`, `SameSite=Lax`. Signature verification on every
+request happens in constant time.
+
+Signature support: EOAs via ECDSA recovery, and ERC-1271 smart contract
+wallets via `isValidSignature` (Coinbase Smart Wallet, Safe, etc.) —
+viem handles both transparently against a Base RPC. The verifying
+chain is configurable (Base mainnet in prod, Base Sepolia in early
+access).
+
+What gets attached to the request:
+
+```ts
+{
+  kind: "wallet_session",
+  walletAddress: "0xAbC…",
+  workspaceId?: string,            // present after /workspace/select
+  role?: "OWNER" | "ADMIN" | "VIEWER"
+}
+```
+
+Routes that need a picked workspace (everything past `/me` and
+`/workspaces`) reject sessions still in the wallet-only state with
+`INVALID_INPUT: workspaceNotSelected`.
+
+## Authorization
+
+Two layers:
+
+```
+Scope:        "is this credential allowed to call this verb?"   (API keys only)
+Membership:   "is this wallet/workspace entitled to this resource?"
+```
+
+**API keys** pass the scope check first; if the resource is scoped to
+the key's workspace (sessions on that workspace, the workspace's
+wallet, etc.) the FK match is the rest of the answer.
+
+**Wallet sessions** carry the role chosen at workspace-select time.
+Per-resource membership is checked via SpiceDB at that pick moment;
+the cookie's `(workspaceId, role)` is the cached result.
+
+SpiceDB's responsibility is narrow: it models the wallet → workspace
+membership graph. Session-level authorization (consumer/operator) is
+a direct FK match on `consumer_workspace_id` / `operator_workspace_id`
+against the principal's `workspaceId`.
+
+## Workspace creation has no auth
+
+```
+POST /api/v1/workspaces/challenge { walletAddress } → nonce + message
+POST /api/v1/workspaces            { walletAddress, signature, nonce, slug, name, roles }
+```
+
+The wallet signature in the body **is** the auth — no API key, no
+cookie. The signing wallet becomes the workspace OWNER and the first
+member.
+
+## /me — who am I
+
+```
+curl https://api.luxxon.dev/api/v1/me -H "Authorization: Bearer lxxn_live_…"
+curl https://api.luxxon.dev/api/v1/me --cookie "lx_session=…"
+```
+
+Returns the principal kind plus identity context — useful for quickly
+confirming a credential works.
+
+## Rotation + revocation
+
+API keys: see [API keys](/concepts/api-keys/#rotation). Mint new, revoke
+old, the revoked key keeps working for 60s while your fleet rolls.
+
+Wallet sessions: expire after 12h. To rotate sooner, sign in again.
+There's no server-side revocation list — leaked cookies remain valid
+until the TTL elapses. Production-grade revocation can come later if
+the threat model demands it.
+
+## Logging
+
+`keyId + workspaceId` on every API-key call. `walletAddress + workspaceId`
+on every wallet-session call. Plaintext API keys and signatures are
+never logged.
+
+<Tip>
+The verify endpoint **/me** is the cheapest way to confirm a credential
+works and inspect what it carries.
+</Tip>

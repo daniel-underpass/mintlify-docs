@@ -1,0 +1,106 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Luxxon",
+  "description": "On-demand live vision API for AI agents. Per-second pricing, on-chain settlement in USDC on Base. The agent-native way to give an LLM eyes on the world.",
+  "colors": {
+    "primary": "#ffd60a",
+    "light": "#ffe171",
+    "dark": "#4d4632"
+  },
+  "favicon": "/favicon.svg",
+  "seo": {
+    "indexing": "all",
+    "metatags": {
+      "canonical": "https://docs.luxxon.dev",
+      "og:site_name": "Luxxon Docs",
+      "og:type": "website",
+      "og:url": "https://docs.luxxon.dev",
+      "twitter:card": "summary_large_image",
+      "twitter:site": "@luxxondev"
+    }
+  },
+  "api": {
+    "playground": {
+      "display": "interactive"
+    },
+    "mdx": {
+      "server": "https://api.luxxon.dev/api/v1"
+    }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Guides",
+        "groups": [
+          {
+            "group": "Getting started",
+            "pages": [
+              "index",
+              "quickstart",
+              "authentication"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/conventions",
+              "concepts/workspaces",
+              "concepts/api-keys",
+              "concepts/operators",
+              "concepts/sessions",
+              "concepts/pricing",
+              "concepts/wallet",
+              "concepts/settlement",
+              "concepts/config",
+              "concepts/trust-model",
+              "concepts/non-crypto-users"
+            ]
+          },
+          {
+            "group": "Integrate",
+            "pages": [
+              "concepts/console",
+              "concepts/mcp",
+              "concepts/sdks"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/errors"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API reference",
+        "openapi": "openapi.json"
+      }
+    ]
+  },
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg"
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "Console",
+        "href": "https://console.luxxon.dev"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Get started",
+      "href": "/quickstart"
+    }
+  },
+  "footer": {
+    "socials": {
+      "x": "https://x.com/luxxondev",
+      "github": "https://github.com/luxxon-dev"
+    }
+  }
+}

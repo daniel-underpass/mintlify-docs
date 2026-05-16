@@ -1,0 +1,193 @@
+---
+title: Settlement
+description: How money moves. Consumer pre-funds a pool, relayer debits per session, atomic on-chain.
+keywords: ["settlement", "on-chain", "smart contract", "luxxonsettlement", "deposit pool", "base", "usdc", "relayer", "kms"]
+---
+
+
+Luxxon settles **on-chain in USDC on Base**. The consumer wallet
+pre-funds a pool on the settlement contract; every session debits
+that pool in one atomic transaction. No custody beyond the pool the
+consumer deposited themselves, no chargebacks, no batched
+reconciliation window. The contract is the ledger.
+
+## The contract
+
+`LuxxonSettlement` v3 is a prepaid deposit-pool router. The Solidity
+source lives at `contracts/src/LuxxonSettlement.sol` in the project
+repository.
+
+**Deployed: Base Sepolia at**
+[`0xa748C178df47c2DA2227C247293943713eB65a26`](https://sepolia.basescan.org/address/0xa748c178df47c2da2227c247293943713eb65a26).
+Mainnet bringup is the next step — same bytecode, same constructor
+params, different RPC.
+
+The shape is **prepaid pool + meter-bounded debit**:
+
+```
+deposit (consumer)   : USDC.transferFrom(consumer → contract)
+                       deposits[consumer] += amount
+
+settle  (relayer)    : deposits[consumer] -= (toAmount + feeAmount)
+                       contract.transfer(operator,       toAmount)
+                       contract.transfer(platformWallet, feeAmount)
+                       settled[sessionId] = true
+
+withdraw (consumer)  : deposits[consumer] -= amount
+                       contract.transfer(consumer, amount)
+                       always permitted, even when paused
+```
+
+Core methods:
+
+```solidity
+function deposit(uint256 amount) external whenNotPaused;
+function withdraw(uint256 amount) external;          // never paused
+function deposits(address consumer) external view returns (uint256);
+
+function settleFromPool(
+    bytes32 sessionId,
+    address from,
+    address to,
+    uint256 ratePerSecond,
+    uint256 chargeableSeconds,
+    uint256 toAmount,
+    uint256 feeAmount
+) external onlyRelayer whenNotPaused;
+```
+
+The contract:
+
+1. Checks `settled[sessionId]` to refuse double-spending the same
+   session.
+2. Enforces the meter invariant `toAmount + feeAmount ≤ ratePerSecond × chargeableSeconds`. Even a fully-trusted relayer can't bill
+   above the rate it quoted the consumer off-chain.
+3. Debits the consumer's pool balance and refuses underflow.
+4. Transfers USDC to the operator and to `platformWallet` (the
+   contract's stored fee recipient — never a settle parameter, so
+   the fee can't be misrouted).
+5. Emits `Settled(sessionId, from, to, toAmount, feeAmount, rate, seconds)`.
+
+Either both transfers succeed or the whole transaction reverts.
+
+There's also a `settleBatch(BatchEntry[])` variant for amortizing
+gas across multiple sessions (up to 100 per tx).
+
+## Trust model
+
+The pool model shifts the trust boundary versus the previous
+EIP-712 per-session signature flow:
+
+- **Before** (v2.1): the consumer signed each session's bounds. A
+  compromised relayer could only settle within those bounds — but
+  the consumer paid a wallet popup per session.
+- **Now** (v3): the consumer signs *the deposit* once. A
+  compromised relayer can drain up to the current pool balance
+  before the consumer notices and withdraws. The contract still
+  enforces the meter invariant + the platform fee recipient, so a
+  rogue relayer can't reroute funds — only over-bill within the
+  pool.
+
+The trade-off: better UX (zero per-session signatures) for a
+softer trust ceiling that the consumer themselves controls by
+sizing the pool. The `withdraw` path is intentionally not gated by
+`whenNotPaused` — the consumer always has an escape valve.
+
+## The relayer
+
+Consumers don't submit on-chain. The flow is:
+
+1. Consumer calls `LuxxonSettlement.approve(spender=settlement, max)`
+   on USDC once.
+2. Consumer calls `LuxxonSettlement.deposit(amount)` — funds the
+   pool. From this point on no further wallet popups are required
+   for sessions.
+3. At session `/end`, the relayer worker (lives in
+   `apps/lx-relayer`) reads the ENDED session and submits
+   `settleFromPool(...)` from its KMS-backed key.
+4. The relayer appends the Coinbase Base Builder Code
+   (`bc_grllwffr`) to the calldata so the volume is attributed to
+   Luxxon in Base's builder rewards program.
+
+Gas is paid by the relayer in ETH on Base. Per-settlement gas:
+~80k ≈ \$0.001. The 15% platform fee covers this many times over.
+
+## State machine
+
+```
+NOT_READY ──────▶ PENDING ──────▶ CONFIRMED
+   session            session            on-chain tx
+   not yet            ENDED;             mined and
+   ENDED              relayer            recorded as
+                      hasn't             LxOnChainEvent
+                      submitted          kind=SETTLE
+```
+
+Read at `GET /settlements/:sessionId`:
+
+```json
+{
+  "sessionId": "...",
+  "state": "PENDING",
+  "payload": {
+    "sessionIdHash": "0x88cadfac...",
+    "from": "0x3f1CD46C...",
+    "to":   "0x712599E0...",
+    "toAmount":    "4250",
+    "feeAmount":    "750",
+    "ratePerSecond": "1000",
+    "chargeableSeconds": 5,
+    "platformFeeBps": 1500,
+    "consumerWorkspaceId": "...",
+    "operatorWorkspaceId": "..."
+  }
+}
+```
+
+When the relayer eventually submits the tx and it confirms, the
+same endpoint returns:
+
+```json
+{
+  "sessionId": "...",
+  "state": "CONFIRMED",
+  "payload": { ... },
+  "txHash": "0xabc...",
+  "confirmedAt": "2026-05-15T22:00:00Z"
+}
+```
+
+## Math
+
+```
+chargeable_seconds = session.cleanSeconds            # failedSeconds drop out
+operator_share_bps = 10000 − platformFeeBps          # default fee 1500 (15%)
+operator_earned    = chargeable × rate × operator_share_bps / 10000
+platform_fee       = chargeable × rate × platform_fee_bps  / 10000
+consumer_charged   = operator_earned + platform_fee
+```
+
+All integer math (basis points + µUSDC BigInt). The exact values
+are reproducible from the session row alone — `cleanSeconds` and
+`ratePerSecondMicroUsdc` are public.
+
+## What's live, what's not
+
+| Layer | Status |
+|---|---|
+| Contract source + foundry tests (24 passing) | Live |
+| Contract deploy + relayer wired | Base **Sepolia** |
+| Pool deposit / withdraw (off-chain) | Live |
+| Pool-balance pre-flight check at `/sessions` create | Live |
+| Relayer worker (`apps/lx-relayer`) | Live, e2e tested on Sepolia |
+| Coinbase Base Builder Code attribution | Live (`bc_grllwffr`) |
+| Mainnet deploy | Pending |
+| Per-workspace fee overrides | Roadmap (today fee is platform-global at 15%) |
+
+<Note>
+Until mainnet bringup, `txHash` values you see point to
+[Base Sepolia](https://sepolia.basescan.org). The wire protocol
+does not change between testnet and mainnet.
+</Note>
+
+See [/settlements](/reference/settlements/) for endpoint reference.

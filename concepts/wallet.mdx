@@ -1,0 +1,167 @@
+---
+title: Wallet
+description: One workspace, one wallet, a pre-funded pool on Base.
+keywords: ["wallet", "usdc", "base", "deposit", "pool", "withdraw", "balance", "coinbase smart wallet", "onramp"]
+---
+
+
+Every workspace owns exactly one Base wallet. The address is set
+when the workspace is created (signature-challenged so the platform
+knows you control it). Consumers fund a per-wallet pool on the
+`LuxxonSettlement` contract; sessions debit from that pool
+automatically. Operators receive USDC directly into their wallet
+each time a session settles.
+
+[Base](https://base.org) is Coinbase's L2 — an Ethereum rollup with
+sub-second blocks, ~$0.001 gas per transaction, and native USDC.
+For non-crypto users, see [Non-crypto users](/concepts/non-crypto-users/)
+for the Smart Wallet + Onramp + paymaster path.
+
+## Two reads: state + events
+
+`GET /wallet` returns the current snapshot:
+
+```json
+{
+  "workspaceId": "bd32919a-...",
+  "walletAddress": "0x3f1CD46C...",
+  "trackedBalance": "50000000",
+  "lastSyncBlock": "66666666",
+  "updatedAt": "2026-05-13T08:30:00Z"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `walletAddress` | Checksummed Base address. Send USDC here to fund. |
+| `trackedBalance` | µUSDC the platform sees on-chain (reconciled by the deposit watcher). |
+| `lastSyncBlock` | Highest block consumed by the watcher. A heartbeat. |
+
+`GET /wallet/events` returns the append-only ledger of on-chain
+activity affecting this workspace:
+
+```json
+[
+  {
+    "id": "9a02393d-...",
+    "kind": "DEPOSIT",
+    "txHash": "0xabc...",
+    "blockNumber": "66666666",
+    "confirmedAt": "2026-05-13T08:30:00Z",
+    "amountUsdc": "50000000",
+    "relatedSession": null
+  },
+  { ... }
+]
+```
+
+Event kinds: `DEPOSIT`, `WITHDRAWAL`, `SETTLE`, `APPROVAL`.
+Cursor-paginated; the prior page's last `id` is the next page's
+`cursor` parameter.
+
+## Funding a consumer wallet
+
+Two steps the first time, one step thereafter.
+
+### Step 1 — get USDC on Base
+
+Pick whichever fits:
+
+**Coinbase Onramp (Apple Pay → USDC on Base)** — the fastest path
+for users without crypto. Apple Pay funds USDC directly on Base,
+typically under a minute for amounts under \$500. KYC inherited
+from Coinbase.
+
+**Direct USDC transfer.** If you already hold USDC on Base, send
+it to your workspace's `walletAddress`. Native USDC on Base is the
+Circle-issued contract `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`.
+
+**Bridge from another chain.** Use any standard bridge (Across,
+Stargate, Coinbase's native bridge for Ethereum L1).
+
+### Step 2 — top up the per-session pool
+
+Sessions debit from a pool on `LuxxonSettlement`, not from your
+wallet directly. Funding the pool is a one-time `approve` + `deposit`:
+
+**From [console.luxxon.dev](https://console.luxxon.dev):** the
+*Wallet* panel on your workspace dashboard surfaces:
+
+- USDC balance in your wallet
+- Pool balance on `LuxxonSettlement` (read via
+  `LuxxonSettlement.deposits(yourWallet)`)
+- A **Top up** button (preset amounts + custom) that signs the
+  `approve` + `deposit` pair
+- A **Withdraw** button that pulls unused balance back
+
+The first top-up is two wallet popups (USDC `approve` followed by
+`deposit`); every subsequent top-up is one popup (`deposit` alone,
+because the approval is already in place).
+
+**Programmatically:**
+
+```ts
+import { erc20Abi, maxUint256 } from "viem";
+import { luxxonSettlementAbi } from "@luxxon/contracts-abi";
+import { walletClient, publicClient } from "./your-client";
+
+// One-time: approve unlimited USDC to the settlement contract.
+const a = await walletClient.writeContract({
+  address: USDC_ADDRESS,        // from GET /config
+  abi: erc20Abi,
+  functionName: "approve",
+  args: [SETTLEMENT_ADDRESS, maxUint256],
+});
+await publicClient.waitForTransactionReceipt({ hash: a });
+
+// Deposit funds into the pool. 5 USDC = 5_000_000 µUSDC.
+const d = await walletClient.writeContract({
+  address: SETTLEMENT_ADDRESS,
+  abi: luxxonSettlementAbi,
+  functionName: "deposit",
+  args: [5_000_000n],
+});
+await publicClient.waitForTransactionReceipt({ hash: d });
+```
+
+After this, every session debits the pool at `/end` with zero
+further signatures. At `POST /sessions` time the API reads
+`LuxxonSettlement.deposits(yourWallet)` and rejects with
+`INSUFFICIENT_CREDIT` if the pool can't cover `rate × maxDurationSeconds`.
+
+### Withdraw
+
+`LuxxonSettlement.withdraw(amount)` pulls unused USDC out of the
+pool to your wallet. The contract honors withdraw even when the
+admin has paused the rest of the platform — your escape valve is
+non-negotiable.
+
+```ts
+await walletClient.writeContract({
+  address: SETTLEMENT_ADDRESS,
+  abi: luxxonSettlementAbi,
+  functionName: "withdraw",
+  args: [3_000_000n],          // 3 USDC back to your wallet
+});
+```
+
+## Receiving payouts (operator side)
+
+Operator workspaces don't need to do anything special. When a
+session they fulfilled settles, the contract's
+`settleFromPool(...)` debits the consumer's pool balance and
+transfers USDC to the operator's wallet in the same transaction.
+The operator's USDC balance just goes up.
+
+There's no "withdraw" flow on the operator side because there's no
+custody to withdraw from — Luxxon never holds the operator's
+USDC. Moving it out (to a CEX, to another wallet, to a swap) is
+between you and your wallet.
+
+## What's NOT in this API yet
+
+- Auto-refund of unused pool balance at workspace deletion
+- Sweep / consolidation endpoints
+- Multi-currency wallets
+
+See [/wallet](/reference/wallet/) for endpoint reference.

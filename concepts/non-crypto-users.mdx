@@ -1,0 +1,128 @@
+---
+title: Non-crypto users
+description: How Luxxon works for people who don't know what a wallet is.
+---
+
+
+Luxxon settles on-chain in USDC on Base. That's the platform's
+ledger discipline, not a UX requirement. The end user — a journalist
+checking a scene, an AI agent verifying a property, a homeowner
+watching their parking spot — should never have to learn what a
+private key is. Three pieces on Base make that work.
+
+## 1. Coinbase Smart Wallet — passkey, no seed phrase
+
+[Coinbase Smart Wallet](https://www.coinbase.com/wallet/smart-wallet)
+is a smart contract wallet (ERC-4337 account abstraction) authenticated
+with a passkey: Face ID, fingerprint, Windows Hello. The first time a
+user signs in, a smart contract wallet is provisioned on Base in a
+few seconds. No seed phrase, no recovery key, no browser extension,
+no app install.
+
+For Luxxon, this means workspace creation works like this:
+
+1. User clicks "Sign in" on the Luxxon dev console.
+2. They authenticate with their phone's biometric.
+3. Coinbase Smart Wallet returns an address. The user signs the SIWE
+   challenge with the passkey-backed key.
+4. The Luxxon API verifies the signature via **ERC-1271**
+   (`isValidSignature`) — which means calling the wallet contract's
+   verification method on-chain. Our `LxChallengeService` does this
+   transparently via viem's `verifyMessage` action.
+5. Workspace created, wallet bound, ready.
+
+From the user's perspective: tap a biometric, type a workspace name,
+done. They never saw a 12-word phrase.
+
+<Note>
+EOA users (MetaMask, Rabby, etc.) keep working unchanged — viem's
+`verifyMessage` short-circuits to ECDSA recovery when the address
+has no contract code. EOA paths don't even hit the RPC.
+</Note>
+
+## 2. Coinbase Onramp — Apple Pay → USDC
+
+To fund a Luxxon session, the user needs USDC in their workspace
+wallet. The non-crypto path is
+[Coinbase Onramp](https://www.coinbase.com/developer-platform/products/onramp):
+
+1. Dev console (or a partner integrator's app) embeds the Onramp
+   widget.
+2. User selects "Top up", picks an amount, and pays with Apple Pay
+   or a card.
+3. Coinbase delivers USDC directly to the workspace wallet on Base.
+4. Sub-minute for amounts under \$500. KYC inherited from Coinbase
+   — no separate verification step.
+
+Compare to the crypto-native path (transfer USDC from an external
+wallet) which assumes the user already has USDC on Base and knows
+how to send it. Onramp absorbs that gap.
+
+## 3. Paymasters — the platform pays the gas
+
+Even with USDC in their wallet, a user calling `LuxxonSettlement.settle`
+indirectly (via session lifecycle) would need ETH on Base to pay gas.
+That's a second on-ramp friction.
+
+Base's first-party paymaster infrastructure
+([Coinbase Paymaster](https://www.coinbase.com/developer-platform/products/paymaster),
+[Pimlico](https://pimlico.io), [Alchemy](https://alchemy.com)) lets
+the **platform** sponsor user gas. ERC-4337 paymasters validate a
+user operation, decide whether to cover its gas, and submit the
+bundled tx.
+
+For Luxxon, this maps to:
+
+- **New workspaces get N sponsored sessions.** First N (e.g. 10)
+  session-settlement transactions are gas-free for the consumer. The
+  Luxxon platform paymaster eats the ~$0.001 each.
+- **After the sponsorship runs out**, the user has been in the
+  marketplace long enough to know they need a bit of ETH for gas —
+  or we keep sponsoring at a smaller rate funded by the platform fee.
+- **Operators** are independent: they accept settlement output
+  (USDC arrives in their wallet), no gas needed on their side.
+
+The "look ma, no gas" experience is what makes the marketplace
+work for users who don't know there's a chain underneath.
+
+## Putting it together
+
+For a user who's never touched crypto:
+
+```
+sign in with Face ID         ← Coinbase Smart Wallet
+top up with Apple Pay        ← Coinbase Onramp
+open a session               ← gas sponsored by platform paymaster
+USDC moves on settlement     ← LuxxonSettlement (atomic)
+```
+
+Four steps. No browser extension. No seed phrase. No bridge. No
+gas. No confirmation modals beyond "approve session" once.
+
+The crypto-native user gets the same surface — they can connect
+MetaMask, fund their wallet however they like, settle gas themselves
+if they prefer. The architecture isn't crypto-native vs non-crypto-
+native; it's **two skins on the same API**.
+
+## What this means for the API contract
+
+Almost nothing. The wire protocol is:
+
+- SIWE challenge — signed by either kind of wallet, verified by
+  `LxChallengeService` which already supports both EOAs and ERC-1271
+- Session create / accept / start / end — unchanged
+- Settlement — Smart Wallets and EOAs both transfer USDC the same
+  way through `LuxxonSettlement`
+
+The differences are all in the **client SDK** and the **dev console
+UX**. The API stays Stripe-shaped.
+
+## Roadmap
+
+- Reference dev console with Smart Wallet sign-in (M6 in the
+  architecture doc)
+- Onramp widget embed in the dev console
+- Platform paymaster integration in the relayer worker (lands with
+  the on-chain bringup PR)
+- SDK affordances: a single `Luxxon.connect()` that picks Smart
+  Wallet by default, falls back to wallet-connect for EOA users

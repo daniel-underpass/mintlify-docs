@@ -1,0 +1,212 @@
+---
+title: "MCP server"
+description: "Drop Luxxon into Claude Desktop, Cursor, Claude Code, or any MCP-aware agent. Ten tools, one npx command — open live video sessions at any lat/lng and feed JPEG frames straight to a vision model."
+icon: "plug"
+keywords: ["mcp", "model context protocol", "claude desktop", "claude code", "cursor", "agent tools", "@luxxon/mcp", "ai agents", "request_live_view"]
+boost: 3
+---
+
+`@luxxon/mcp` is the canonical agent integration path. It runs as a
+[Model Context Protocol](https://modelcontextprotocol.io) server over
+stdio and exposes Luxxon as agent-callable tools — your agent calls
+them like any other function, no WebRTC stack required.
+
+```bash
+npx -y --package=@luxxon/mcp luxxon-mcp
+```
+
+## Install
+
+The server is published on npm and runs on demand via `npx`. No
+global install needed.
+
+It's also listed in the major MCP catalogs:
+
+<CardGroup cols={2}>
+  <Card
+    title="Smithery"
+    description="One-line install for Claude Desktop / Cursor / Claude Code."
+    href="https://smithery.ai/servers/luxxon"
+  />
+  <Card
+    title="Glama"
+    description="Verified MCP catalog with tool introspection + scorecard."
+    href="https://glama.ai/mcp/servers/luxxon-dev/luxxon-sdk"
+  />
+</CardGroup>
+
+Or wire it manually:
+
+<Tabs>
+  <Tab title="Claude Desktop">
+  Edit `~/Library/Application Support/Claude/claude_desktop_config.json`
+  (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+
+  ```json
+  {
+    "mcpServers": {
+      "luxxon": {
+        "command": "npx",
+        "args": ["-y", "--package=@luxxon/mcp", "luxxon-mcp"],
+        "env": {
+          "LUXXON_API_KEY": "lxxn_live_..."
+        }
+      }
+    }
+  }
+  ```
+
+  Restart Claude Desktop. The ten Luxxon tools appear under the
+  tools icon in the message composer.
+  </Tab>
+
+  <Tab title="Cursor">
+  Add to Cursor's MCP config (Settings → Features → Model Context
+  Protocol):
+
+  ```json
+  {
+    "command": "npx",
+    "args": ["-y", "--package=@luxxon/mcp", "luxxon-mcp"],
+    "env": { "LUXXON_API_KEY": "lxxn_live_..." }
+  }
+  ```
+  </Tab>
+
+  <Tab title="Claude Code">
+  Add a `.mcp.json` at your project root:
+
+  ```json
+  {
+    "mcpServers": {
+      "luxxon": {
+        "command": "npx",
+        "args": ["-y", "--package=@luxxon/mcp", "luxxon-mcp"],
+        "env": {
+          "LUXXON_API_KEY": "${LUXXON_API_KEY}"
+        }
+      }
+    }
+  }
+  ```
+
+  Set `enableAllProjectMcpServers: true` in
+  `.claude/settings.local.json` to auto-trust, then `export
+  LUXXON_API_KEY=...` and restart your Claude Code session.
+  </Tab>
+
+  <Tab title="Any MCP client">
+  Standard stdio transport. Run:
+
+  ```bash
+  LUXXON_API_KEY=lxxn_live_... npx -y --package=@luxxon/mcp luxxon-mcp
+  ```
+
+  The process speaks JSON-RPC 2.0 on stdin/stdout per the MCP spec.
+  </Tab>
+</Tabs>
+
+## Tools
+
+Twelve tools, authenticated via the `LUXXON_API_KEY` env var. The
+headline (`request_live_view`) takes a lat/lng pair and a duration;
+everything else is a thin wrapper around a single API endpoint.
+
+| Tool | Returns | When to use |
+|---|---|---|
+| `request_live_view` | `{ sessionId, state, whepUrl?, hint }` | **Start here.** Open + dispatch + wait-for-LIVE in one call. `sessionId` is always returned, even if the operator doesn't reach LIVE in time. |
+| `wait_for_live` | `{ sessionId, state, whepUrl?, hint }` | Keep waiting on a known `sessionId` that hasn't gone LIVE yet (e.g. recovery after a `request_live_view` timeout). |
+| `list_sessions` | `{ count, sessions }` | Recover a `sessionId` you lost, or audit recent workspace sessions. Filter client-side by state. |
+| `get_session` | Session JSON (state, meter, settlement) | Read where the session is in its lifecycle |
+| `get_frame` | JPEG (inline image content block) | Hand directly to a vision model |
+| `get_stream_url` | WHEP playback URL | Agent has its own WebRTC stack |
+| `end_session` | Updated session JSON | Close a LIVE session; triggers on-chain settle |
+| `cancel_session` | Updated session JSON | Abort a pre-LIVE session (REQUESTED / ASSIGNED) |
+| `get_pricing_quote` | `{ quoteId, ratePerSecondMicroUsdc, estimatedTotalMicroUsdc, … }` | Estimate cost before opening; returns a quoteId to lock the rate on `request_live_view` |
+| `get_coverage` | Anonymized list of operator coverage circles | Pre-flight check: is Luxxon available here? |
+| `get_wallet` | `{ trackedBalance, lastSyncBlock, … }` | Decide whether to top up before a session |
+| `get_settlement` | `{ state, txHash, confirmedAt, payload }` | Read on-chain tx info after `end_session` |
+
+### `request_live_view` — the headline
+
+The one tool call from prompt to live frame:
+
+```
+agent: "look at lat 4.71, lng -74.05 for 30 seconds and tell me what's happening"
+  → tool call: request_live_view({ lat: 4.71, lng: -74.05, maxDurationSeconds: 30 })
+  → response: { sessionId: "a1b2c3...", whepUrl: "https://...", state: "LIVE", hint: "call get_frame next" }
+agent: → tool call: get_frame({ sessionId: "a1b2c3..." })
+  → response: <image: 640x480 JPEG, 32KB>
+agent: "looks like a busy intersection at dusk; ~12 cars visible..."
+  → tool call: end_session({ sessionId: "a1b2c3..." })
+  → response: { state: "ENDED", cleanSeconds: 28, chargedMicroUsdc: "28000" }
+```
+
+The operator's pool is debited per second at session end via
+`LuxxonSettlement.settleFromPool` — no wallet popup, no per-call
+signature. Throws `NO_COVERAGE` (503) if no operator is in range;
+`get_coverage` is your pre-flight check.
+
+#### When the operator doesn't go LIVE in time
+
+`request_live_view` does **not** throw on a wait-for-LIVE timeout —
+it returns the `sessionId` plus the current `state` (usually
+`ASSIGNED`) so the agent can decide what to do next:
+
+```
+→ tool call: request_live_view({ lat, lng, maxDurationSeconds: 30 })
+→ response: {
+    sessionId: "a1b2c3...",
+    state: "ASSIGNED",
+    waitOutcome: "TIMEOUT",
+    hint: "Operator hasn't gone LIVE. Call wait_for_live('a1b2c3...') to keep waiting, or cancel_session('a1b2c3...') to give up."
+  }
+→ tool call: wait_for_live({ sessionId: "a1b2c3...", timeoutMs: 30000 })
+→ response: { sessionId: "a1b2c3...", state: "LIVE", whepUrl: "...", hint: "Call get_frame for a JPEG." }
+```
+
+If you lost a `sessionId` (e.g. a previous tool run crashed before
+returning), call `list_sessions` to find it — sessions are returned
+newest first, with their current state.
+
+### `get_frame`
+
+For LIVE sessions only. Returns the latest decoded video frame as a
+JPEG content block. MCP-aware clients pass it straight to the LLM as
+image input — no base64 plumbing on your side.
+
+The first call right after `request_live_view` resolves may return
+`FRAME_NOT_AVAILABLE` for 3-5s while Cloudflare's edge sends the
+first keyframe. Retry with a short backoff.
+
+## Auth
+
+Pass your workspace API key via `LUXXON_API_KEY`. Use
+`lxxn_test_*` keys today; `lxxn_live_*` will work once the
+mainnet contract ships (until then, LIVE keys are rejected at the
+API layer).
+
+The pool model means **no wallet popups, ever** — the consumer
+workspace pre-deposits USDC to `LuxxonSettlement` once via the
+[console](https://console.luxxon.dev), and every session debits
+from that pool at end-time. The MCP holds nothing more than the
+API key.
+
+## Not yet wired (v0.3+)
+
+Most of the original strategy is shipped. The next batch needs new
+API-side primitives:
+
+- `get_observation` — single-frame SKU (per-frame pricing endpoint)
+- Bounty tools (`create_bounty`, `get_bounty_status`) —
+  pay-on-fulfillment for unsupported locations
+
+Track progress in the [`luxxon-sdk`](https://github.com/luxxon-dev/luxxon-sdk)
+repo.
+
+## Source + issues
+
+- `npm i @luxxon/mcp` — npm package
+- `github.com/luxxon-dev/luxxon-sdk` — source, including the
+  TypeScript SDK the server is built on
+- Issues + feature requests via the repo

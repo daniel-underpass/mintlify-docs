@@ -1,0 +1,238 @@
+---
+title: Sessions
+description: The atomic unit of work. One request → one match → one live stream.
+keywords: ["sessions", "state machine", "lifecycle", "whip", "whep", "live stream", "dispatcher", "pool"]
+---
+
+
+A **session** is one live video feed from one point on Earth, for a
+bounded duration, charged at a locked-in per-second rate. Everything
+the platform does cashes out into a session lifecycle.
+
+## State machine
+
+```
+                       accept           start          end
+REQUESTED ────────────▶ ASSIGNED ─────▶ LIVE ────────▶ ENDED
+   │                                                    │
+   │ DELETE                                    cleanSeconds × rate
+   ▼                                           → chargedMicroUsdc
+CANCELLED                                      → settleFromPool() on-chain
+```
+
+| State | Meaning |
+|---|---|
+| `REQUESTED` | Consumer POSTed `/sessions`. Waiting for an operator. The API has already verified the consumer's on-chain pool balance covers `rate × maxDuration`. |
+| `ASSIGNED` | Operator workspace accepted (or auto-dispatched). No signature step — the pool already covers the worst-case meter. The operator can `/start` immediately. |
+| `LIVE` | Stream is open. Meter is anchored at `startedAt`. |
+| `ENDED` | Final state. Meter populated, relayer queues an on-chain `settleFromPool(...)` against the consumer's pool. |
+| `CANCELLED` | Pre-LIVE escape. Either consumer cancels, or system on timeout. |
+| `EXPIRED` | LIVE session overran `maxDuration` without `/end` — the system finalizes it and queues settlement. |
+
+`PAUSED` is in the enum and on the roadmap.
+
+## Race safety
+
+All three operator-side transitions (`accept`, `start`, `end`) and
+consumer `cancel` use **CAS** (compare-and-swap) updates — the SQL
+includes a `WHERE state=...` clause so only one writer wins. The loser
+sees a fresh fetch of the actual current state, surfaced as
+`INVALID_STATE` with the conflicting state in `detail`:
+
+```json
+{
+  "code": "INVALID_STATE",
+  "detail": "session:accept:ASSIGNED"
+}
+```
+
+You can safely retry an operation that returns `INVALID_STATE` — the
+detail tells you what happened.
+
+## Creating a session
+
+```bash
+curl -X POST .../sessions \
+  -H "Authorization: Bearer $KEY" \
+  -d '{
+    "lat": 4.71,
+    "lng": -74.07,
+    "maxDurationSeconds": 300
+  }'
+```
+
+The session is created in `REQUESTED` state. The rate is computed
+and stamped (immutable for the rest of the session). The `hold` =
+`rate × maxDurationSeconds` is calculated for client-side display.
+
+Before accepting the request, the API reads
+`LuxxonSettlement.deposits(consumerWallet)` on-chain and rejects
+with `INSUFFICIENT_CREDIT` (HTTP 400) if the pool balance can't
+cover the worst-case meter. Top up via
+`LuxxonSettlement.deposit(amount)` and retry — the session will
+clear immediately once the chain reflects the new balance.
+
+Pass `quoteId` to lock the rate via the quote-locked flow — see
+[Pricing](/concepts/pricing/#two-flows-spot-and-quote-locked).
+
+## Accept (operator side)
+
+```bash
+curl -X POST .../sessions/$ID/accept \
+  -H "Authorization: Bearer $OPERATOR_KEY" \
+  -d '{}'
+```
+
+CAS: `REQUESTED → ASSIGNED`. The operator workspace's id gets
+stamped on `operator_workspace_id`. There is no signature step —
+the consumer's pool already covers the worst-case meter, and the
+on-chain contract enforces the meter invariant at settle time, so
+no per-session authorization payload needs to flow back to the
+consumer. The operator can `/start` immediately.
+
+There's no SpiceDB write at accept time; session visibility is a
+direct FK match against `consumer_workspace_id` /
+`operator_workspace_id`.
+
+The workspace must have `SUPPLIER` in `roles`, else
+`session:notSupplier` (403).
+
+## Start (operator side)
+
+```bash
+curl -X POST .../sessions/$ID/start \
+  -H "Authorization: Bearer $OPERATOR_KEY"
+```
+
+CAS: `ASSIGNED → LIVE`. Server stamps `startedAt`. From this moment,
+the meter is ticking against this timestamp.
+
+<Warning>
+Once the **telemetry preflight** ships (roadmap), `start` will reject
+unless a fresh in-geofence telemetry sample exists. Today the check
+is wall-clock-only.
+</Warning>
+
+## End
+
+```bash
+curl -X POST .../sessions/$ID/end \
+  -H "Authorization: Bearer $KEY"   # operator OR consumer key
+```
+
+Required scope: `sessions:operate` OR `sessions:create` (either side
+may end — operator hangs up, or consumer ends the call). Wallet-session
+callers pass by FK match against the consumer or operator workspace
+on the session.
+
+CAS: `LIVE → ENDED`. The meter runs:
+
+```
+cleanSeconds       = floor((endedAt − startedAt) / 1000)
+failedSeconds      = 0                              # roadmap: QoS-driven
+chargedMicroUsdc   = cleanSeconds × ratePerSecond
+```
+
+Once `ENDED`, the settlement payload is composable — see
+[Settlement](/concepts/settlement/).
+
+## Cancel (pre-LIVE)
+
+```bash
+curl -X DELETE .../sessions/$ID \
+  -H "Authorization: Bearer $CONSUMER_KEY"
+```
+
+Allowed in `REQUESTED` or `ASSIGNED`. Transitions to `CANCELLED`. No
+meter, no charge.
+
+`DELETE` on a LIVE session is **not** end — it returns `INVALID_STATE`.
+Use `POST /:id/end` for that.
+
+## Reading
+
+| Endpoint | Returns |
+|---|---|
+| `GET /sessions/:id` | One session |
+| `GET /sessions` | The caller's workspace's sessions (consumer-side) |
+
+Both gated by direct FK match against `consumer_workspace_id` /
+`operator_workspace_id`. Either side of the session sees it; nothing
+else does.
+
+## Video plane
+
+`POST /sessions/:id/start` returns the WebRTC URLs the operator
+uses to publish and any consumer uses to subscribe:
+
+- `whipUrl` — the operator POSTs an SDP offer here to publish
+  (WHIP). The URL itself is the auth bearer; treat it as secret.
+- `whepUrl` — anyone with this URL can subscribe (WHEP). Treat
+  as a session-scoped secret.
+
+Both URLs are **stable for the lifetime of the underlying
+live_input**, so either side can re-fetch them mid-session if a
+browser tab crashes or a device hands off to another:
+
+- `GET /sessions/:id/viewer-token` → `{ whepUrl }` (consumer + operator)
+- `GET /sessions/:id/producer-token` → `{ whipUrl }` (operator only)
+
+The edge is Cloudflare Stream WebRTC. Sub-second latency,
+open protocols on both sides, no proprietary SDK to integrate.
+
+**From the console:** open
+[**console.luxxon.dev → /workspace/[id]/sessions/[sid]**](https://console.luxxon.dev)
+on a LIVE session for an embedded WHEP viewer. Operators publishing from a
+browser can open `console.luxxon.dev/publish/[sessionId]` — that page
+opens `getUserMedia` (rear cam preferred), fetches the WHIP URL via
+`/producer-token`, and negotiates the publish from the browser.
+
+## Frames for AI agents
+
+`GET /sessions/:id/frame` returns `image/jpeg` of the latest
+decoded video frame from the operator's feed. Designed for
+agents that poll a single observation rather than consuming a
+continuous WebRTC stream — the JPEG goes straight to a vision
+model without a media-decoding stack on the caller's side.
+
+Implementation: lx-api runs a per-session WHEP subscriber that
+decodes and caches the latest frame (~1 fps). The first
+keyframe typically arrives within 3-5 seconds of `/start`;
+calls before that return `404 FRAME_NOT_AVAILABLE`. After,
+each call returns the latest cached buffer with
+`Cache-Control: no-store`.
+
+```bash
+curl -H "Authorization: Bearer $KEY" \
+  $API/sessions/$SESSION_ID/frame -o frame.jpg
+```
+
+## Telemetry-driven meter
+
+`cleanSeconds` is the wall-clock duration minus the sum of
+`LxDisconnectWindow` rows opened during the session.
+Disconnect windows have a `reason`:
+
+- `NETWORK_ERROR` — Cloudflare's edge stopped seeing media
+- `STALE_TELEMETRY` — the operator's location heartbeats
+  stopped advancing
+- `OUTSIDE_GEOFENCE` — the operator strayed outside the
+  consumer's requested radius
+
+The relayer reads `cleanSeconds` directly and passes it as
+`chargeableSeconds` in `settleFromPool()`. See
+[Trust model](/concepts/trust-model/) for the discriminator.
+
+## Not in v1 yet
+
+- `PAUSED` state (consumer pauses mid-flight — drones,
+  bookended outages)
+- Per-frame `/observations` SKU (priced separately from
+  per-second video)
+- H.264 server-side frame decode for the agent-frame endpoint
+  (works today for desktop publishers via VP8; iOS Safari
+  publishers fall back to H.264, where `GET /frame` returns
+  `FRAME_NOT_AVAILABLE` until we wire a second decode path —
+  browser-to-browser WHEP playback is unaffected)
+
+See [/sessions](/reference/sessions/) for endpoint reference.

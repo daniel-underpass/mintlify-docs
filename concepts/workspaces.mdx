@@ -1,0 +1,137 @@
+---
+title: Workspaces
+description: The unit of multi-tenancy. Holds the wallet, the keys, the members.
+---
+
+
+A **workspace** is your team's container on Luxxon. Every API key,
+every wallet, every session belongs to one. The same primitive works
+on the consumer side and the supplier side — the `roles` field
+enables specific scopes.
+
+Create one in 30 seconds at [**console.luxxon.dev**](https://console.luxxon.dev) →
+*New workspace*, or via the wire protocol below.
+
+## What it owns
+
+| Slot | Held |
+|---|---|
+| `id` | UUID. First 6 hex chars surface in API key prefixes for visual ownership. |
+| `slug` | URL-safe handle, unique. Display use. |
+| `name` | Human label. |
+| `walletAddress` | Base wallet (checksummed). Signature-proven on create. |
+| `roles` | `Set<"CONSUMER" \| "SUPPLIER">`. One or both. |
+| `createdByWallet` | The wallet that signed the SIWE challenge at workspace creation — first OWNER. |
+| API keys | One or many, each with its own scopes. See [API keys](/concepts/api-keys/). |
+| Members | Dashboard wallets with console access. SpiceDB is the authority for permission checks; `LxWorkspaceMember` is the per-workspace cache (so listing members doesn't need a `LookupSubjects` round-trip). |
+| Sessions | All `LxSession` rows where this workspace is `consumer_workspace_id` or `operator_workspace_id`. |
+
+## Roles
+
+`CONSUMER` and `SUPPLIER`. A workspace can be one or both; the gates
+are:
+
+| To call | Workspace must have |
+|---|---|
+| `POST /sessions` (create) | `CONSUMER` |
+| `POST /sessions/:id/accept` | `SUPPLIER` |
+
+`SUPPLIER`-only workspaces can't request sessions; `CONSUMER`-only
+workspaces can't accept them. Mixed workspaces (a security firm that
+buys feeds in one zone and sells in another) just hold both roles.
+
+## Creating a workspace
+
+Two-step flow because the workspace is bound to a Base wallet —
+the platform needs to know the human creating it controls the private
+key.
+
+### 1. Request a challenge
+
+`POST /workspaces/challenge` (public) with the wallet address:
+
+```json
+{ "walletAddress": "0x3f1CD46C..." }
+```
+
+Returns:
+
+```json
+{
+  "nonce": "5a125b7dd8f522a1ccddb2b7e529273c",
+  "message": "Luxxon — sign in to prove wallet ownership.\n\nAddress: 0x3f1CD46C...\nNonce: 5a125b7dd8f522a1ccddb2b7e529273c",
+  "expiresAt": "2026-05-13T08:42:34Z"
+}
+```
+
+### 2. Sign + create
+
+Sign the exact `message` with the wallet's private key (any
+Sign-In-With-Ethereum-compatible signer — `viem`, `ethers`, MetaMask
+all work). Then POST the workspace with the signature:
+
+```json
+{
+  "slug": "acme-eyes",
+  "name": "Acme Vision",
+  "walletAddress": "0x3f1CD46C...",
+  "signature": "0x8953f55b...",
+  "nonce": "5a125b7dd8f522a1ccddb2b7e529273c",
+  "roles": ["CONSUMER", "SUPPLIER"]
+}
+```
+
+This endpoint is **public** — the signature itself is the auth. The
+signing wallet becomes the workspace OWNER + first member. The
+nonce-and-signature single-use pair is the gate, and is enforced
+against the in-memory pending challenges table.
+
+### 3. Capture the ZedToken
+
+The response carries `consistencyToken` (also in the
+`X-Lx-Consistency-Token` header). Echo it on any immediate follow-up
+call (e.g. minting your first API key) so the SpiceDB write is
+guaranteed visible. See [Conventions / ZedTokens](/concepts/conventions/#consistency-zedtokens).
+
+## Membership
+
+The creator is the first OWNER. Membership is dual-stored:
+SpiceDB holds the authoritative relation graph on the `lx_workspace`
+resource, and `LxWorkspaceMember` is a per-workspace cache for cheap
+listings.
+
+```
+lx_workspace:<id>#owner@wallet:<address>
+lx_workspace:<id>#admin@wallet:<address>
+lx_workspace:<id>#viewer@wallet:<address>
+```
+
+Hierarchy: `owner > admin > viewer`. Higher roles inherit the lower's
+permissions through the permission graph defined in the
+`spicedb/schema.zed` source:
+
+| Role | Permits |
+|---|---|
+| OWNER | `transfer`, `administrate`, `view` |
+| ADMIN | `administrate`, `view` |
+| VIEWER | `view` |
+
+<Note>
+Inviting additional members via API is on the roadmap. During early
+access, every workspace has exactly one OWNER member (the creator).
+</Note>
+
+## What a workspace cannot have
+
+- A second wallet. One workspace, one address. Need another wallet?
+  Create another workspace.
+- Two slugs. Slugs are unique globally.
+- A USDC balance held by Luxxon. The platform never custodies funds
+  — the wallet address you registered is where USDC actually sits.
+
+## Soft delete
+
+`deletedAt` is in the schema; the delete endpoint is on the roadmap.
+Workspaces aren't currently destructible via API.
+
+See [/workspaces](/reference/workspaces/) for endpoint reference.
