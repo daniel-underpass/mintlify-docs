@@ -27,7 +27,7 @@ CANCELLED       CANCELLED / EXPIRED               → settleFromPool() on-chain
 | `LIVE` | Frames are flowing. Meter is anchored at `startedAt`, which is stamped at the first-frame transition (NOT at `/start`) so the operator isn't billed for WebRTC negotiation + first-keyframe latency. `get_frame` returns bytes immediately. |
 | `ENDED` | Final state. Meter populated, relayer queues an on-chain `settleFromPool(...)` against the consumer's pool. |
 | `CANCELLED` | Pre-LIVE escape. Consumer `DELETE`, operator bulk cancel (`POST /sessions/cancel-all-assignments`), or a tied teardown from those paths. |
-| `EXPIRED` | Two flavors: (a) LIVE session overran `maxDuration` without `/end` — the system finalizes it and queues settlement, OR (b) pre-LIVE session aged past `createdAt + maxDurationSeconds` without media ever flowing — the system releases the operator and tears down the live_input (no meter, no settle). |
+| `EXPIRED` | Two flavors: (a) LIVE session overran `maxDurationSeconds` without `/end` — the system finalizes it and queues settlement, OR (b) pre-LIVE session aged past `createdAt + waitTimeoutSeconds` without media ever flowing — the system releases the operator and tears down the live_input (no meter, no settle). |
 
 `PAUSED` is in the enum and on the roadmap.
 
@@ -57,13 +57,20 @@ curl -X POST .../sessions \
   -d '{
     "lat": 4.71,
     "lng": -74.07,
-    "maxDurationSeconds": 300
+    "maxDurationSeconds": 300,
+    "waitTimeoutSeconds": 300
   }'
 ```
 
 The session is created in `REQUESTED` state. The rate is computed
 and stamped (immutable for the rest of the session). The `hold` =
 `rate × maxDurationSeconds` is calculated for client-side display.
+
+`maxDurationSeconds` bounds the LIVE meter (worst-case settle hold).
+`waitTimeoutSeconds` is independent — it bounds how long the session
+sits in `REQUESTED`/`ASSIGNED` before the cron flips it to `EXPIRED`.
+Pass it when you want the consumer to wait longer (or shorter) than
+the default 5 minutes. Server clamps to `[5, 3600]`.
 
 Before accepting the request, the API reads
 `LuxxonSettlement.deposits(consumerWallet)` on-chain and rejects
@@ -186,7 +193,7 @@ Scope: `sessions:operate`.
 ### Pre-LIVE expiry
 
 A background cron sweeps `REQUESTED` / `ASSIGNED` rows where
-`createdAt + maxDurationSeconds < NOW()` and moves them to
+`createdAt + waitTimeoutSeconds < NOW()` and moves them to
 `EXPIRED`. This is the backstop for an operator that called
 `/start` but never published, or a `REQUESTED` session that nothing
 ever picked up. No meter is run (`startedAt` is null), but the
