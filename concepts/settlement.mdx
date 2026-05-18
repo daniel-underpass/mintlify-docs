@@ -97,8 +97,7 @@ sizing the pool. The `withdraw` path is intentionally not gated by
 
 Consumers don't submit on-chain. The flow is:
 
-1. Consumer calls `LuxxonSettlement.approve(spender=settlement, max)`
-   on USDC once.
+1. Consumer calls `USDC.approve(spender=settlement, max)` once.
 2. Consumer calls `LuxxonSettlement.deposit(amount)` — funds the
    pool. From this point on no further wallet popups are required
    for sessions.
