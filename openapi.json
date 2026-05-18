@@ -4385,7 +4385,7 @@
   ],
   "servers": [
     {
-      "url": "http://localhost:3010"
+      "url": "https://api.luxxon.dev/api/v1"
     }
   ],
   "components": {
